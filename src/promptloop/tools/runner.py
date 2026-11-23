@@ -1,15 +1,18 @@
-import json
 import asyncio
-import uuid
-import time
+import json
 import re
-from pathlib import Path
+import time
+import uuid
+from contextlib import suppress
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
-from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage
+
 from langchain.chat_models import init_chat_model
-import jsonschema
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+
+from ..metrics import evaluate_sync_metric, result_passed
 
 DEFAULT_MAX_CONCURRENCY = 4
 
@@ -72,51 +75,17 @@ def make_runner_tools(project_dir: Path):
             score = raw_score if raw_score <= 1 else raw_score / 10.0
             score = min(max(score, 0.0), 1.0)
 
+        if score is None:
+            detail = "failed: could not parse a numeric score; judge response: " + raw[:500]
+        else:
+            detail = raw[:600]
+
         return {
             "type": "llm_judge",
             "passed": (score >= 0.7) if score is not None else None,
             "score": round(score, 3) if score is not None else None,
-            "detail": raw[:600],
+            "detail": detail,
         }
-
-    def _run_sync_metric(metric: dict, actual_output: str, expected_output: Optional[str]) -> dict:
-        t = metric.get("type")
-        result: dict = {"type": t, "passed": None, "score": None, "detail": ""}
-
-        if t == "latency":
-            result["detail"] = "measured separately"
-            result["passed"] = True
-
-        elif t == "json_schema":
-            try:
-                parsed = json.loads(actual_output)
-                schema = metric.get("schema")
-                if schema:
-                    jsonschema.validate(parsed, schema)
-                result["passed"] = True
-                result["detail"] = "valid JSON" + (" matching schema" if schema else "")
-            except json.JSONDecodeError as e:
-                result["passed"] = False
-                result["detail"] = f"invalid JSON: {e}"
-            except jsonschema.ValidationError as e:
-                result["passed"] = False
-                result["detail"] = f"schema mismatch: {e.message}"
-
-        elif t == "fuzzy_match":
-            if expected_output is None:
-                result["detail"] = "no expected_output provided"
-            else:
-                from difflib import SequenceMatcher
-                ratio = SequenceMatcher(None, actual_output.strip(), expected_output.strip()).ratio()
-                threshold = metric.get("threshold", 0.8)
-                result["score"] = round(ratio, 3)
-                result["passed"] = ratio >= threshold
-                result["detail"] = f"similarity {ratio:.1%} (threshold {threshold:.0%})"
-
-        elif t == "llm_judge":
-            result["detail"] = "__pending__"
-
-        return result
 
     async def _run_test_case(
         tc: dict,
@@ -161,7 +130,7 @@ def make_runner_tools(project_dir: Path):
                         metric.get("judge_model", default_judge_model),
                     ))
                 else:
-                    sync_results.append(_run_sync_metric(metric, actual_output, tc.get("expected_output")))
+                    sync_results.append(evaluate_sync_metric(metric, actual_output, tc.get("expected_output")))
 
             judge_results = await asyncio.gather(*async_tasks) if async_tasks else []
 
@@ -256,6 +225,7 @@ def make_runner_tools(project_dir: Path):
         concurrency = max(1, min(requested_concurrency, len(test_cases) * len(resolved_models)))
         semaphore = asyncio.Semaphore(concurrency)
         results: list[dict] = []
+        total_count = len(test_cases) * len(resolved_models)
 
         async def _run_limited(tc: dict, model: str) -> dict:
             async with semaphore:
@@ -267,40 +237,53 @@ def make_runner_tools(project_dir: Path):
             for model in resolved_models
         ]
 
-        for completed in asyncio.as_completed(tasks):
-            result = await completed
-            results.append(result)
-            partial_data = {
+        def _write_run_data(status: str, error: str | None = None) -> None:
+            run_data: dict[str, Any] = {
                 "run_id": run_id,
                 "prompt_id": prompt_id,
                 "models": resolved_models,
                 "prompt_version": prompt_version,
                 "started_at": started_at,
-                "status": "running",
+                "status": status,
                 "max_concurrency": concurrency,
                 "completed": len(results),
-                "total": len(tasks),
+                "total": total_count,
                 "results": results,
             }
-            (run_dir / "raw.json").write_text(json.dumps(partial_data, indent=2))
+            if error is not None:
+                run_data["error"] = error
+            (run_dir / "raw.json").write_text(json.dumps(run_data, indent=2))
 
-        run_data = {
-            "run_id": run_id,
-            "prompt_id": prompt_id,
-            "models": resolved_models,
-            "prompt_version": prompt_version,
-            "started_at": started_at,
-            "status": "complete",
-            "max_concurrency": concurrency,
-            "results": [r for r in results],
-        }
-        (run_dir / "raw.json").write_text(json.dumps(run_data, indent=2))
+        status = "running"
+        failure: str | None = None
+        try:
+            for completed in asyncio.as_completed(tasks):
+                result = await completed
+                results.append(result)
+                _write_run_data("running")
+            status = "complete"
+        except asyncio.CancelledError:
+            status = "cancelled"
+            failure = "cancelled by user"
+            raise
+        except Exception as exc:  # noqa: BLE001
+            status = "failed"
+            failure = str(exc)
+            raise
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if status in {"cancelled", "failed"}:
+                with suppress(Exception):
+                    _write_run_data(status, failure)
+
+        _write_run_data(status)
 
         # Summary
-        passed = sum(
-            1 for r in results
-            if not r.get("error") and all(m.get("passed") is not False for m in r.get("metrics", []))
-        )
+        passed = sum(1 for r in results if result_passed(r))
         failed = len(results) - passed
         latencies = [r["latency_ms"] for r in results if r.get("latency_ms")]
         avg_lat = sum(latencies) / len(latencies) if latencies else 0
@@ -313,7 +296,7 @@ def make_runner_tools(project_dir: Path):
             "",
         ]
         for r in results:
-            status = "✓" if not r.get("error") and all(m.get("passed") is not False for m in r.get("metrics", [])) else "✗"
+            status = "✓" if result_passed(r) else "✗"
             metric_summary = " | ".join(
                 f"{m['type']}: {m.get('detail', '') or m.get('score', '')}"
                 for m in r.get("metrics", [])
@@ -349,10 +332,7 @@ def make_runner_tools(project_dir: Path):
             if not raw_file.exists():
                 continue
             data = json.loads(raw_file.read_text())
-            passed = sum(
-                1 for r in data["results"]
-                if not r.get("error") and all(m.get("passed") is not False for m in r.get("metrics", []))
-            )
+            passed = sum(1 for r in data["results"] if result_passed(r))
             total = len(data["results"])
             has_report = (run_dir / "report.md").exists()
             models = ", ".join(data.get("models", []))

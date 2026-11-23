@@ -313,6 +313,7 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
     # ─────────────────────────────────────────────────────────────────────────
 
     interrupted = False
+    stream_error: Exception | None = None
     stop_escape_listener = asyncio.Event()
     escape_task: Optional[asyncio.Task[bool]] = None
     active_tool_run_ids: set[str] = set()
@@ -471,7 +472,10 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
             with suppress(asyncio.CancelledError):
                 await stream_task
         elif stream_task in done:
-            await stream_task
+            try:
+                await stream_task
+            except Exception as exc:  # noqa: BLE001
+                stream_error = exc
     except KeyboardInterrupt:
         interrupted = True
     finally:
@@ -482,6 +486,13 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
             with suppress(asyncio.CancelledError):
                 await escape_task
         _show_cursor()
+
+    if stream_error is not None:
+        error_lines = str(stream_error).strip().splitlines()
+        detail = error_lines[0] if error_lines else type(stream_error).__name__
+        if len(detail) > 200:
+            detail = detail[:197] + "..."
+        console.print(f"\n[red]error ({type(stream_error).__name__}): {detail}[/red]", end="")
 
     if interrupted:
         console.print("\n[yellow]interrupted[/yellow]", end="")
@@ -511,8 +522,20 @@ async def amain() -> None:
     )
     args = parser.parse_args()
 
-    project_dir = args.project_dir.resolve()
+    project_dir = args.project_dir.expanduser().resolve()
+    if not project_dir.exists():
+        parser.error(f"--project-dir does not exist: {project_dir}")
+    if not project_dir.is_dir():
+        parser.error(f"--project-dir is not a directory: {project_dir}")
     _load_env(project_dir)
+
+    if args.thread:
+        resolved_thread_id, error = _resolve_thread_id(project_dir, args.thread)
+        if error:
+            parser.error(error)
+        thread_id = resolved_thread_id or args.thread
+    else:
+        thread_id = str(uuid.uuid4())
 
     # Ensure .evals exists for chat DB
     (project_dir / ".evals").mkdir(parents=True, exist_ok=True)
@@ -521,7 +544,6 @@ async def amain() -> None:
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
         gate = ApprovalGate()
         agent = create_eval_agent(project_dir, args.model, checkpointer=checkpointer, gate=gate)
-        thread_id = args.thread if args.thread else str(uuid.uuid4())
 
         console.print(WELCOME)
         console.print(f"[dim]project: {project_dir}[/dim]")

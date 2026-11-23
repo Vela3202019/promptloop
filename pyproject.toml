@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "promptloop"
 version = "0.1.0"
 description = "Interactive agent for the full prompt eval loop: create, run, report, improve."
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "deepagents>=0.4.11",
     "langchain>=1.2.12",

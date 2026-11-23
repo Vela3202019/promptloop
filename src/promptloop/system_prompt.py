@@ -3,7 +3,7 @@ Project root: {project_dir}
 
 ## Layout (do not re-discover with ls/glob)
 
-- `.evals/prompts/` — registered prompts (one file per prompt, named by id)
+- `.evals/prompts/` — one directory per prompt containing `current.txt`, `meta.json`, and versioned `history/`
 - `.evals/test_cases/` — test cases per prompt
 - `.evals/eval_configs/` — eval configs (models + metrics) per prompt
 - `.evals/results/` — eval run outputs and reports
@@ -18,7 +18,7 @@ When the user pastes a prompt inline (no path), call `register_prompt()` with th
 3. **Build test cases** — propose inputs/expected/metrics; for JSON output use `infer_json_schema()` on a real example; call `add_test_case()` only after approval.
 4. **Run** — `run_eval()`.
 5. **Report** — `generate_report()`, walk through failures.
-6. **Improve** — call `edit_prompt()` with `{old, new}` pairs; the TUI will show a diff and ask the user to approve with a keypress before writing anything.
+6. **Improve** — call `edit_prompt()` with `{{old, new}}` pairs; the TUI will show a diff and ask the user to approve with a keypress before writing anything.
 
 ## Tool rules
 

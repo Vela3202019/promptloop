@@ -9,6 +9,34 @@ def make_test_case_tools(project_dir: Path):
     test_cases_dir = project_dir / ".evals" / "test_cases"
     eval_configs_dir = project_dir / ".evals" / "eval_configs"
 
+    def _validate_metrics(metrics: list[dict] | None, expected_output: str | None) -> str | None:
+        if metrics is None:
+            return None
+        for index, metric in enumerate(metrics, start=1):
+            if not isinstance(metric, dict):
+                return f"Error: metric {index} must be an object."
+            metric_type = metric.get("type")
+            if metric_type not in {"latency", "json_schema", "fuzzy_match", "llm_judge"}:
+                return f"Error: metric {index} has unknown type {metric_type!r}."
+            if metric_type == "json_schema":
+                schema = metric.get("schema")
+                if not isinstance(schema, (dict, bool)):
+                    return f"Error: metric {index} (json_schema) requires an object or boolean 'schema'."
+            elif metric_type == "fuzzy_match":
+                if expected_output is None:
+                    return f"Error: metric {index} (fuzzy_match) requires expected_output."
+                threshold = metric.get("threshold", 0.8)
+                if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
+                    return f"Error: metric {index} (fuzzy_match) requires a numeric 'threshold' between 0 and 1."
+            elif metric_type == "llm_judge":
+                judge_prompt = metric.get("judge_prompt")
+                if not isinstance(judge_prompt, str) or not judge_prompt.strip():
+                    return f"Error: metric {index} (llm_judge) requires a non-empty 'judge_prompt'."
+                judge_model = metric.get("judge_model")
+                if judge_model is not None and not isinstance(judge_model, str):
+                    return f"Error: metric {index} (llm_judge) requires 'judge_model' to be a string."
+        return None
+
     @tool(parse_docstring=True)
     def add_test_case(
         prompt_id: str,
@@ -34,6 +62,10 @@ def make_test_case_tools(project_dir: Path):
         Returns:
             Confirmation with the new test case ID.
         """
+        validation_error = _validate_metrics(metrics, expected_output)
+        if validation_error is not None:
+            return validation_error
+
         tc_dir = test_cases_dir / prompt_id
         tc_dir.mkdir(parents=True, exist_ok=True)
 

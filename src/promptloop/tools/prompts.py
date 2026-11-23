@@ -1,6 +1,7 @@
-import json
 import difflib
+import json
 import re
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -30,11 +31,21 @@ class ApprovalGate:
 def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
     prompts_dir = project_dir / ".evals" / "prompts"
 
+    def _version_number(path: Path) -> Optional[int]:
+        try:
+            return int(path.stem[1:])
+        except ValueError:
+            return None
+
     def _next_version(history_dir: Path) -> int:
-        existing = list(history_dir.glob("v*.txt"))
-        if not existing:
+        versions = []
+        for path in history_dir.glob("v*.txt"):
+            version = _version_number(path)
+            if version is not None:
+                versions.append(version)
+        if not versions:
             return 1
-        return max(int(p.stem[1:]) for p in existing) + 1
+        return max(versions) + 1
 
     def _save_prompt(
         content: str,
@@ -62,7 +73,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         return version, prompt_dir
 
     def _inline_prompt_id() -> str:
-        return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
     def _prompt_dir(prompt_id: str) -> Path:
         if not SAFE_PROMPT_ID.fullmatch(prompt_id):
@@ -286,10 +297,13 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"No history found for '{prompt_id}'."
 
         meta = json.loads((prompt_dir / "meta.json").read_text())
-        versions = sorted(history_dir.glob("v*.txt"), key=lambda p: int(p.stem[1:]))
+        versioned_files = []
+        for path in history_dir.glob("v*.txt"):
+            num = _version_number(path)
+            if num is not None:
+                versioned_files.append((num, path))
         lines = [f"Version history for '{prompt_id}':"]
-        for v in versions:
-            num = int(v.stem[1:])
+        for num, v in sorted(versioned_files):
             marker = " ← current" if num == meta["version"] else ""
             lines.append(f"  v{num}: {len(v.read_text())} chars{marker}")
         return "\n".join(lines)

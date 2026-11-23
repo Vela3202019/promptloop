@@ -3,5 +3,11 @@ __pycache__/
 *.pyc
 .DS_Store
 .evals/
+.env
 .env.local
 data
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
