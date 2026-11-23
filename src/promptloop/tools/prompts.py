@@ -265,6 +265,9 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         Returns:
             Confirmation with the registered prompt ID and a content preview.
         """
+        if prompt_id is not None and not prompt_id.strip():
+            prompt_id = None
+
         try:
             p = _source_path_if_file(source)
         except ValueError as e:

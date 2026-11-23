@@ -186,6 +186,22 @@ def test_explicit_duplicate_id_updates_source_path(tmp_path):
     assert not (tmp_path / ".evals" / "prompts" / "shared_2").exists()
 
 
+def test_blank_prompt_id_auto_derives_and_dedupes(tmp_path):
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    (first_dir / "shared.txt").write_text("first prompt")
+    (second_dir / "shared.txt").write_text("second prompt")
+
+    _, tools = _tools(tmp_path)
+    first = tools["register_prompt"].invoke({"source": "first/shared.txt"})
+    second = tools["register_prompt"].invoke({"source": "second/shared.txt", "prompt_id": "   "})
+
+    assert "Registered prompt 'shared' (v1)" in first
+    assert "Registered prompt 'shared_2' (v1)" in second
+
+
 def test_register_prompt_accepts_virtual_project_path(tmp_path):
     prompt_file = tmp_path / "src" / "prompts" / "virtual.txt"
     prompt_file.parent.mkdir(parents=True)
