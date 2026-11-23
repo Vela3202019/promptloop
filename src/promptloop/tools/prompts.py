@@ -113,14 +113,17 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         resolved_source_path: str | None = None,
     ) -> tuple[int, Path]:
         prompt_dir = _prompt_dir(prompt_id)
+        history_dir = _prompt_artifact(prompt_id, "history")
+        current_file = _prompt_artifact(prompt_id, "current.txt")
+        meta_file = _prompt_artifact(prompt_id, "meta.json")
+
         prompt_dir.mkdir(parents=True, exist_ok=True)
-        history_dir = prompt_dir / "history"
         history_dir.mkdir(exist_ok=True)
-
         version = _next_version(history_dir)
-        _prompt_artifact(prompt_id, "current.txt").write_text(content)
-        _prompt_artifact(prompt_id, "history", f"v{version}.txt").write_text(content)
+        history_file = _prompt_artifact(prompt_id, "history", f"v{version}.txt")
 
+        current_file.write_text(content)
+        history_file.write_text(content)
         meta = {
             "source_path": source_path,
             "resolved_source_path": resolved_source_path,
@@ -129,7 +132,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             "registered_at": datetime.now().isoformat(),
             "version": version,
         }
-        _prompt_artifact(prompt_id, "meta.json").write_text(json.dumps(meta, indent=2))
+        meta_file.write_text(json.dumps(meta, indent=2))
         return version, prompt_dir
 
     def _inline_prompt_id() -> str:
@@ -234,16 +237,22 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
 
-        current = _prompt_artifact(prompt_id, "current.txt").read_text()
+        try:
+            current_file = _prompt_artifact(prompt_id, "current.txt")
+            meta_file = _prompt_artifact(prompt_id, "meta.json")
+            current = current_file.read_text()
+            meta = json.loads(meta_file.read_text())
+            new_version = meta["version"] + 1
+            history_file = _prompt_artifact(prompt_id, "history", f"v{new_version}.txt")
+        except ValueError as e:
+            return f"Error: {e}; changes were not applied."
+
         if current == new_content:
             return "No changes detected between current and proposed content."
 
-        meta = json.loads(_prompt_artifact(prompt_id, "meta.json").read_text())
-        new_version = meta["version"] + 1
         source_path_value = meta.get("source_path")
-        if not source_path_value:
-            source_note = "No source file to update for inline prompt."
-        else:
+        source_path = None
+        if source_path_value:
             try:
                 source_path = resolve_in_project(project_dir, Path(source_path_value))
             except ValueError as e:
@@ -253,15 +262,18 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             expected_target = meta.get("resolved_source_path")
             if expected_target is not None and str(source_path) != expected_target:
                 return "Error: prompt changed, re-propose the edit; changes were not applied."
+
+        if source_path is None:
+            source_note = "No source file to update for inline prompt."
+        else:
             source_path.write_text(new_content)
             source_note = f"Source file updated at {source_path}."
 
-        _prompt_artifact(prompt_id, "history", f"v{new_version}.txt").write_text(new_content)
-        _prompt_artifact(prompt_id, "current.txt").write_text(new_content)
-
+        history_file.write_text(new_content)
+        current_file.write_text(new_content)
         meta["version"] = new_version
         meta["updated_at"] = datetime.now().isoformat()
-        _prompt_artifact(prompt_id, "meta.json").write_text(json.dumps(meta, indent=2))
+        meta_file.write_text(json.dumps(meta, indent=2))
 
         return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
 
