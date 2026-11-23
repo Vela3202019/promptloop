@@ -70,6 +70,27 @@ def test_inline_prompt_ids_are_unique(tmp_path):
     assert len(list((tmp_path / ".evals" / "prompts").iterdir())) == 2
 
 
+def test_duplicate_source_file_stems_get_distinct_ids(tmp_path):
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    (first_dir / "shared.txt").write_text("first prompt")
+    (second_dir / "shared.txt").write_text("second prompt")
+
+    _, tools = _tools(tmp_path)
+    first = tools["register_prompt"].invoke({"source": "first/shared.txt"})
+    second = tools["register_prompt"].invoke({"source": "second/shared.txt"})
+    first_again = tools["register_prompt"].invoke({"source": "first/shared.txt"})
+
+    assert "Registered prompt 'shared' (v1)" in first
+    assert "Registered prompt 'shared_2' (v1)" in second
+    assert "Registered prompt 'shared' (v2)" in first_again
+    prompts_dir = tmp_path / ".evals" / "prompts"
+    assert (prompts_dir / "shared" / "current.txt").read_text() == "first prompt"
+    assert (prompts_dir / "shared_2" / "current.txt").read_text() == "second prompt"
+
+
 def test_prompt_id_traversal_is_rejected(tmp_path):
     _, tools = _tools(tmp_path)
     result = tools["register_prompt"].invoke({"source": "content", "prompt_id": "../escape"})

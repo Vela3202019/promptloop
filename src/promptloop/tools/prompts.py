@@ -127,6 +127,28 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
     def _prompt_dir(prompt_id: str) -> Path:
         return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"))
 
+    def _dedupe_file_prompt_id(prompt_id: str, source_path: str) -> str:
+        candidate = prompt_id
+        suffix = 2
+        while True:
+            try:
+                prompt_dir = _prompt_dir(candidate)
+            except ValueError:
+                return candidate
+            if not prompt_dir.exists():
+                return candidate
+            meta_file = prompt_dir / "meta.json"
+            existing_source = None
+            if meta_file.exists():
+                try:
+                    existing_source = json.loads(meta_file.read_text()).get("source_path")
+                except (OSError, json.JSONDecodeError):
+                    existing_source = None
+            if existing_source == source_path:
+                return candidate
+            candidate = f"{prompt_id}_{suffix}"
+            suffix += 1
+
     def _source_path_if_file(source: str) -> Path | None:
         if "\n" in source or len(source) > 240:
             return None
@@ -249,6 +271,9 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             source_path = None
             source_type = "inline"
             source_label = "Source: inline prompt"
+
+        if source_type == "file" and source_path is not None:
+            pid = _dedupe_file_prompt_id(pid, source_path)
 
         try:
             version, _ = _save_prompt(content, pid, source_path, source_type)
