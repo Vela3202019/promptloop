@@ -154,7 +154,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
                 return candidate
             if not prompt_dir.exists():
                 return candidate
-            meta_file = _prompt_artifact(prompt_id, "meta.json")
+            meta_file = _prompt_artifact(candidate, "meta.json")
             existing_source = None
             if meta_file.exists():
                 try:
