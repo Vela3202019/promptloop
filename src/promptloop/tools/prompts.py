@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import hashlib
 import json
 import uuid
 from datetime import datetime
@@ -8,6 +9,11 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..paths import resolve_in_evals, resolve_in_project, validate_id
+
+
+def prompt_approval_key(prompt_id: str, current: str, edits: list[dict]) -> str:
+    payload = json.dumps({"prompt_id": prompt_id, "current": current, "edits": edits}, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 class _ApprovalWaiter:
@@ -28,6 +34,7 @@ class ApprovalGate:
         self._decisions: dict[str, bool] = {}
         self._expected: set[str] = set()
         self._waiters: dict[str, list[_ApprovalWaiter]] = {}
+        self._rejection_messages: dict[str, str] = {}
         self._listener_timeout = listener_timeout
         self._decision_timeout = decision_timeout
 
@@ -36,8 +43,12 @@ class ApprovalGate:
         for waiter in self._waiters.get(key, []):
             waiter.listener_seen = True
 
-    def resolve(self, key: str, approved: bool) -> None:
+    def resolve(self, key: str, approved: bool, rejection_message: str | None = None) -> None:
         self._expected.discard(key)
+        if approved or rejection_message is None:
+            self._rejection_messages.pop(key, None)
+        else:
+            self._rejection_messages[key] = rejection_message
         waiters = self._waiters.get(key)
         if waiters:
             waiter = waiters.pop(0)
@@ -47,6 +58,13 @@ class ApprovalGate:
                 waiter.future.set_result(approved)
         else:
             self._decisions[key] = approved
+
+    def rejection_message(self, key: str) -> str | None:
+        return self._rejection_messages.pop(key, None)
+
+    def drop(self, key: str) -> None:
+        self._decisions.pop(key, None)
+        self._rejection_messages.pop(key, None)
 
     async def consume(self, key: str) -> bool:
         if key in self._decisions:
@@ -101,24 +119,29 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         prompt_id: str,
         source_path: str | None,
         source_type: str,
+        resolved_source_path: str | None = None,
     ) -> tuple[int, Path]:
         prompt_dir = _prompt_dir(prompt_id)
+        history_dir = _prompt_artifact(prompt_id, "history")
+        current_file = _prompt_artifact(prompt_id, "current.txt")
+        meta_file = _prompt_artifact(prompt_id, "meta.json")
+
         prompt_dir.mkdir(parents=True, exist_ok=True)
-        history_dir = prompt_dir / "history"
         history_dir.mkdir(exist_ok=True)
-
         version = _next_version(history_dir)
-        (prompt_dir / "current.txt").write_text(content)
-        (history_dir / f"v{version}.txt").write_text(content)
+        history_file = _prompt_artifact(prompt_id, "history", f"v{version}.txt")
 
+        current_file.write_text(content)
+        history_file.write_text(content)
         meta = {
             "source_path": source_path,
+            "resolved_source_path": resolved_source_path,
             "source_type": source_type,
             "prompt_id": prompt_id,
             "registered_at": datetime.now().isoformat(),
             "version": version,
         }
-        (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        meta_file.write_text(json.dumps(meta, indent=2))
         return version, prompt_dir
 
     def _inline_prompt_id() -> str:
@@ -126,6 +149,9 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
 
     def _prompt_dir(prompt_id: str) -> Path:
         return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"))
+
+    def _prompt_artifact(prompt_id: str, *parts: str) -> Path:
+        return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"), *parts)
 
     def _dedupe_file_prompt_id(prompt_id: str, source_path: str) -> str:
         candidate = prompt_id
@@ -137,7 +163,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
                 return candidate
             if not prompt_dir.exists():
                 return candidate
-            meta_file = prompt_dir / "meta.json"
+            meta_file = _prompt_artifact(candidate, "meta.json")
             existing_source = None
             if meta_file.exists():
                 try:
@@ -149,7 +175,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             candidate = f"{prompt_id}_{suffix}"
             suffix += 1
 
-    def _source_path_if_file(source: str) -> Path | None:
+    def _source_path_if_file(source: str) -> tuple[Path, Path] | None:
         if "\n" in source or len(source) > 240:
             return None
 
@@ -164,7 +190,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         physical_exists = _is_file(physical_path)
         if physical_exists:
             try:
-                return resolve_in_project(project_dir, physical_path)
+                return physical_path.absolute(), resolve_in_project(project_dir, physical_path)
             except ValueError:
                 if not raw_path.is_absolute():
                     raise
@@ -172,10 +198,10 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if raw_path.is_absolute():
             virtual_path = project_dir / str(raw_path).lstrip("/")
             if _is_file(virtual_path):
-                return resolve_in_project(project_dir, virtual_path)
+                return virtual_path.absolute(), resolve_in_project(project_dir, virtual_path)
 
         if physical_exists:
-            return resolve_in_project(project_dir, physical_path)
+            return physical_path.absolute(), resolve_in_project(project_dir, physical_path)
         return None
 
     def _diff(current: str, proposed: str, prompt_id: str) -> str:
@@ -220,32 +246,43 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
 
-        current = (prompt_dir / "current.txt").read_text()
+        try:
+            current_file = _prompt_artifact(prompt_id, "current.txt")
+            meta_file = _prompt_artifact(prompt_id, "meta.json")
+            current = current_file.read_text()
+            meta = json.loads(meta_file.read_text())
+            new_version = meta["version"] + 1
+            history_file = _prompt_artifact(prompt_id, "history", f"v{new_version}.txt")
+        except ValueError as e:
+            return f"Error: {e}; changes were not applied."
+
         if current == new_content:
             return "No changes detected between current and proposed content."
 
-        meta = json.loads((prompt_dir / "meta.json").read_text())
-        new_version = meta["version"] + 1
         source_path_value = meta.get("source_path")
-        if not source_path_value:
-            source_note = "No source file to update for inline prompt."
-        else:
+        source_path = None
+        if source_path_value:
             try:
                 source_path = resolve_in_project(project_dir, Path(source_path_value))
             except ValueError as e:
                 return f"Error: {e}; changes were not applied."
             if not source_path.exists():
                 return f"Error: source file {source_path} not found; changes were not applied."
+            expected_target = meta.get("resolved_source_path")
+            if expected_target is not None and str(source_path) != expected_target:
+                return "Error: prompt changed, re-propose the edit; changes were not applied."
+
+        if source_path is None:
+            source_note = "No source file to update for inline prompt."
+        else:
             source_path.write_text(new_content)
             source_note = f"Source file updated at {source_path}."
 
-        history_dir = prompt_dir / "history"
-        (history_dir / f"v{new_version}.txt").write_text(new_content)
-        (prompt_dir / "current.txt").write_text(new_content)
-
+        history_file.write_text(new_content)
+        current_file.write_text(new_content)
         meta["version"] = new_version
         meta["updated_at"] = datetime.now().isoformat()
-        (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        meta_file.write_text(json.dumps(meta, indent=2))
 
         return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
 
@@ -273,7 +310,10 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         except ValueError as e:
             return f"Error: {e}"
 
+        resolved_source_path = None
         if p is not None:
+            p, resolved_path = p
+            resolved_source_path = str(resolved_path)
             content = p.read_text()
             pid = prompt_id or p.stem.replace(" ", "_").lower()
             source_path = str(p)
@@ -292,7 +332,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             pid = _dedupe_file_prompt_id(pid, source_path)
 
         try:
-            version, _ = _save_prompt(content, pid, source_path, source_type)
+            version, _ = _save_prompt(content, pid, source_path, source_type, resolved_source_path)
         except ValueError as e:
             return f"Error: {e}"
         preview = content[:300] + "\n..." if len(content) > 300 else content
@@ -314,7 +354,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not registered. Use register_prompt first."
-        meta = json.loads((prompt_dir / "meta.json").read_text())
+        meta = json.loads(_prompt_artifact(prompt_id, "meta.json").read_text())
         content = (prompt_dir / "current.txt").read_text()
         source = meta.get("source_path") or "inline prompt"
         return f"Prompt '{prompt_id}' — v{meta['version']} — source: {source}\n\n{content}"
@@ -362,28 +402,35 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
-        current_file = prompt_dir / "current.txt"
-        meta_file = prompt_dir / "meta.json"
+        current_file = _prompt_artifact(prompt_id, "current.txt")
+        meta_file = _prompt_artifact(prompt_id, "meta.json")
         current = current_file.read_text()
         base_meta = json.loads(meta_file.read_text())
         base_version = base_meta.get("version")
-        new_content, error = _build_prompt_from_edits(current, edits)
-        if error:
-            return error
-        if not await gate.consume(prompt_id):
-            return f"Edit to '{prompt_id}' cancelled by user."
-
-        latest_content = current_file.read_text()
-        latest_meta = json.loads(meta_file.read_text())
-        identity_fields = ("prompt_id", "source_path", "source_type", "registered_at")
-        if any(latest_meta.get(field) != base_meta.get(field) for field in identity_fields):
-            return "Error: prompt changed, re-propose the edit."
-        latest_version = latest_meta.get("version")
-        if latest_content != current or latest_version != base_version:
-            new_content, error = _build_prompt_from_edits(latest_content, edits)
+        approval_key = prompt_approval_key(prompt_id, current, edits)
+        try:
+            new_content, error = _build_prompt_from_edits(current, edits)
             if error:
+                return error
+            if not await gate.consume(approval_key):
+                rejection_message = gate.rejection_message(approval_key)
+                if rejection_message:
+                    return f"Edit to '{prompt_id}' cancelled. {rejection_message}"
+                return f"Edit to '{prompt_id}' cancelled by user."
+
+            latest_content = current_file.read_text()
+            latest_meta = json.loads(meta_file.read_text())
+            identity_fields = ("prompt_id", "source_path", "source_type", "registered_at", "resolved_source_path")
+            if any(latest_meta.get(field) != base_meta.get(field) for field in identity_fields):
                 return "Error: prompt changed, re-propose the edit."
-        return _apply_content(prompt_id, new_content)
+            latest_version = latest_meta.get("version")
+            if latest_content != current or latest_version != base_version:
+                new_content, error = _build_prompt_from_edits(latest_content, edits)
+                if error:
+                    return "Error: prompt changed, re-propose the edit."
+            return _apply_content(prompt_id, new_content)
+        finally:
+            gate.drop(approval_key)
 
     @tool(parse_docstring=True)
     def show_prompt_history(prompt_id: str) -> str:
@@ -403,7 +450,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if not history_dir.exists():
             return f"No history found for '{prompt_id}'."
 
-        meta = json.loads((prompt_dir / "meta.json").read_text())
+        meta = json.loads(_prompt_artifact(prompt_id, "meta.json").read_text())
         versioned_files = []
         for path in history_dir.glob("v*.txt"):
             num = _version_number(path)

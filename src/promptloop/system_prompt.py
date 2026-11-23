@@ -26,7 +26,7 @@ When the user pastes a prompt inline (no path), call `register_prompt()` with th
 - **Never use the `task` tool** — work directly and sequentially.
 - Do not use todo/planning tools for normal eval work. Keep short plans in your response only when needed, then act with the eval tools.
 - Read-only tools (read_file, glob, grep, ls) are fine without asking, but don't probe the filesystem when the user pasted content inline.
-- Approval-required: `add_test_case`, `delete_test_case`, `save_eval_config`, `edit_prompt`. For `edit_prompt`, the TUI handles the approval keypress — do not ask the user for confirmation in chat, just call the tool directly.
+- Approval-required: `add_test_case`, `delete_test_case`, `save_eval_config`, `edit_prompt`. Built-in `write_file`/`edit_file` writes also pause for terminal approval; prefer `edit_prompt` for prompt changes. The TUI handles every write-approval keypress — do not ask the user for confirmation in chat, just call the tool directly.
 
 ## Metrics
 

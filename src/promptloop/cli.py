@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import copy
 import difflib
 import os
 import select
@@ -10,18 +11,21 @@ import time
 import tty
 import uuid
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Command
 from prompt_toolkit import HTML
 from rich.console import Console
+from rich.markup import escape
 
 from .agent import create_eval_agent
 from .paths import resolve_in_evals, validate_id
 from .tools import ApprovalGate
+from .tools.prompts import prompt_approval_key
 
 if TYPE_CHECKING:
     from prompt_toolkit import PromptSession
@@ -69,6 +73,10 @@ RECURSION_LIMIT = 100
 
 CHAT_DB_NAME = "chat.db"
 ESCAPE_KEY = "\x1b"
+MAX_FILE_PREVIEW_BYTES = 64 * 1024
+MAX_DIFF_LINES = 200
+CHANGE_TOO_LARGE_MESSAGE = "change too large to review; split it into smaller changes"
+CHANGE_TOO_LARGE_REJECTION = "The change is too large to review; split it into smaller edits."
 
 
 def _chat_db_path(project_dir: Path) -> Path:
@@ -215,22 +223,273 @@ def _render_prompt_diff(project_dir: Path, prompt_id: str, edits: list[dict]) ->
             return "diff unavailable: no changes detected"
 
         console.print()
-        for line in diff_lines:
-            line = line.rstrip("\n")
-            if line.startswith(("+++", "---")):
-                console.print(f"[dim]{line}[/dim]")
-            elif line.startswith("+"):
-                console.print(f"[green]{line}[/green]")
-            elif line.startswith("-"):
-                console.print(f"[red]{line}[/red]")
-            elif line.startswith("@@"):
-                console.print(f"[cyan]{line}[/cyan]")
-            else:
-                console.print(f"[dim]{line}[/dim]")
+        diff_error = _print_diff_lines(diff_lines)
+        if diff_error:
+            return diff_error
         console.print()
     except Exception as e:  # noqa: BLE001
         return f"diff unavailable: {e}"
     return None
+
+
+def _terminal_safe(text: str) -> str:
+    """Replace control characters that could manipulate the user's terminal."""
+    rendered = []
+    for char in text:
+        if char == "\t" or char.isprintable():
+            rendered.append(char)
+        elif ord(char) <= 0xFF:
+            rendered.append(f"\\x{ord(char):02x}")
+        elif ord(char) <= 0xFFFF:
+            rendered.append(f"\\u{ord(char):04x}")
+        else:
+            rendered.append(f"\\U{ord(char):08x}")
+    return "".join(rendered)
+
+
+def _print_diff_lines(diff_lines: list[str]) -> str | None:
+    if len(diff_lines) > MAX_DIFF_LINES:
+        return CHANGE_TOO_LARGE_MESSAGE
+    for line in diff_lines:
+        line = _terminal_safe(line.rstrip("\n"))
+        rendered = escape(line)
+        if line.startswith(("+++", "---")):
+            console.print(f"[dim]{rendered}[/dim]")
+        elif line.startswith("+"):
+            console.print(f"[green]{rendered}[/green]")
+        elif line.startswith("-"):
+            console.print(f"[red]{rendered}[/red]")
+        elif line.startswith("@@"):
+            console.print(f"[cyan]{rendered}[/cyan]")
+        else:
+            console.print(f"[dim]{rendered}[/dim]")
+    return None
+
+
+def _oversized_review_rejection(render_error: str | None) -> str | None:
+    if render_error == CHANGE_TOO_LARGE_MESSAGE:
+        return CHANGE_TOO_LARGE_REJECTION
+    return None
+
+
+def _virtual_project_path(project_dir: Path, file_path: str) -> Path:
+    if not file_path:
+        raise ValueError("missing file path")
+    posix_path = file_path.replace("\\", "/")
+    if ".." in PurePosixPath(posix_path).parts or file_path.startswith("~"):
+        raise ValueError(f"path traversal is not allowed: {file_path}")
+    if len(file_path) >= 2 and file_path[0].isalpha() and file_path[1] == ":":
+        raise ValueError(f"Windows absolute paths are not supported: {file_path}")
+    normalized = os.path.normpath(posix_path).replace("\\", "/")
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    candidate = (project_dir / normalized.lstrip("/")).resolve()
+    try:
+        candidate.relative_to(project_dir.resolve())
+    except ValueError:
+        raise ValueError(f"path escapes project directory: {file_path}") from None
+    return candidate
+
+
+def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]) -> str | None:
+    """Render a write_file/edit_file preview. Any error means the caller must deny."""
+    try:
+        raw_path = args.get("file_path")
+        if not isinstance(raw_path, str):
+            return "preview unavailable: missing or invalid file_path"
+        display_path = raw_path if raw_path.startswith("/") else f"/{raw_path}"
+        path = _virtual_project_path(project_dir, raw_path)
+
+        if name == "write_file":
+            content = args.get("content")
+            if not isinstance(content, str):
+                return "preview unavailable: missing or invalid content"
+            if path.exists():
+                if not path.is_file():
+                    return "preview unavailable: target exists but is not a file"
+                console.print(
+                    "[yellow]write_file cannot overwrite existing files; "
+                    "approval will return a tool error. Use edit_file instead.[/yellow]"
+                )
+                if path.stat().st_size > MAX_FILE_PREVIEW_BYTES or len(content.encode()) > MAX_FILE_PREVIEW_BYTES:
+                    return "preview unavailable: file is too large to diff safely"
+                current = path.read_text(encoding="utf-8")
+                if current == content:
+                    console.print("[dim]content is unchanged[/dim]")
+                else:
+                    diff_lines = list(difflib.unified_diff(
+                        current.splitlines(keepends=True),
+                        content.splitlines(keepends=True),
+                        fromfile=f"{display_path} (current)",
+                        tofile=f"{display_path} (proposed)",
+                        n=3,
+                    ))
+                    console.print()
+                    diff_error = _print_diff_lines(diff_lines)
+                    if diff_error:
+                        return diff_error
+                    console.print()
+            else:
+                console.print(f"[dim]new file ({len(content)} characters)[/dim]")
+                lines = content.split("\n")
+                truncated = len(content) > 1200 or len(lines) > 30
+                preview = "\n".join(lines[:30])[:1200]
+                sys.stdout.write("  proposed content:\n")
+                if preview:
+                    preview_lines = "\n".join(f"    {_terminal_safe(line)}" for line in preview.split("\n"))
+                    sys.stdout.write(preview_lines + "\n")
+                if truncated:
+                    sys.stdout.write("    …\n    [truncated preview]\n")
+            return None
+
+        if name == "edit_file":
+            old_string = args.get("old_string")
+            new_string = args.get("new_string")
+            replace_all = args.get("replace_all", False)
+            if not isinstance(old_string, str):
+                return "preview unavailable: missing or invalid old_string"
+            if not isinstance(new_string, str):
+                return "preview unavailable: missing or invalid new_string"
+            old_string = old_string.replace("\r\n", "\n").replace("\r", "\n")
+            new_string = new_string.replace("\r\n", "\n").replace("\r", "\n")
+            if not isinstance(replace_all, bool):
+                return "preview unavailable: replace_all must be a boolean"
+            if not path.exists() or not path.is_file():
+                return "preview unavailable: target file not found"
+            raw_content = path.read_bytes()
+            if len(raw_content) > MAX_FILE_PREVIEW_BYTES:
+                return "preview unavailable: file is too large to preview safely"
+            normalizes_line_endings = b"\r" in raw_content
+            current = raw_content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            if normalizes_line_endings:
+                console.print(
+                    "[yellow]this edit rewrites the whole file and normalizes all line endings to LF[/yellow]"
+                )
+            if old_string == new_string:
+                if not normalizes_line_endings:
+                    return "preview unavailable: old_string and new_string are identical"
+                console.print("[dim]text content is unchanged; only line endings will change[/dim]")
+            if not old_string and (replace_all or current):
+                return "preview unavailable: empty old_string is only supported for an empty file without replace_all"
+            count = current.count(old_string)
+            if count == 0:
+                return "preview unavailable: old_string was not found"
+            if count != 1 and not replace_all:
+                return f"preview unavailable: old_string matches {count} places"
+            current_bytes = len(current.encode("utf-8"))
+            old_bytes = len(old_string.encode("utf-8"))
+            new_bytes = len(new_string.encode("utf-8"))
+            estimated_size = current_bytes + count * max(0, new_bytes - old_bytes)
+            if estimated_size > MAX_FILE_PREVIEW_BYTES:
+                return "preview unavailable: edit result is too large to preview safely"
+            if replace_all:
+                proposed = current.replace(old_string, new_string)
+            else:
+                proposed = current.replace(old_string, new_string, 1)
+            diff_lines = list(difflib.unified_diff(
+                current.splitlines(keepends=True),
+                proposed.splitlines(keepends=True),
+                fromfile=f"{display_path} (current)",
+                tofile=f"{display_path} (proposed)",
+                n=3,
+            ))
+            console.print()
+            diff_error = _print_diff_lines(diff_lines)
+            if diff_error:
+                return diff_error
+            console.print()
+            return None
+
+        return f"preview unavailable: unsupported write action '{name}'"
+    except Exception as e:  # noqa: BLE001
+        return f"preview unavailable: {e}"
+
+
+def _interrupt_action_requests(value: Any) -> list[Any]:
+    if not isinstance(value, dict):
+        raise ValueError("unsupported interrupt payload")
+    action_requests = value.get("action_requests")
+    if not isinstance(action_requests, list) or not action_requests:
+        raise ValueError("interrupt payload has no pending actions")
+    return action_requests
+
+
+def _combine_interrupt_responses(responses: list[tuple[str, dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+    return {interrupt_id: response for interrupt_id, response in responses}
+
+
+def _file_write_interrupt_snapshot(interrupts: Any) -> tuple[Any, ...]:
+    return tuple(
+        (item.id, tuple(copy.deepcopy(action) for action in _interrupt_action_requests(item.value)))
+        for item in interrupts
+    )
+
+
+async def _decide_file_write_interrupt(
+    project_dir: Path,
+    interrupt_value: Any,
+    auto_approve: bool,
+) -> dict[str, Any]:
+    decisions = []
+    for action in _interrupt_action_requests(interrupt_value):
+        if not isinstance(action, dict):
+            console.print("[red]invalid interrupt action; write denied[/red]")
+            decisions.append({
+                "type": "reject",
+                "message": "The pending file-write action was malformed; the file was not changed.",
+            })
+            continue
+        name = action.get("name")
+        args = action.get("args")
+        if not isinstance(name, str) or not isinstance(args, dict):
+            console.print("[red]interrupt action is missing a name or arguments; write denied[/red]")
+            decisions.append({
+                "type": "reject",
+                "message": "The pending file-write action was malformed; the file was not changed.",
+            })
+            continue
+        raw_path = args.get("file_path")
+        display_path = raw_path if isinstance(raw_path, str) else "<unknown path>"
+        header = (
+            f"\n[yellow]approval required[/yellow] [bold]{escape(name)}[/bold] "
+            f"[cyan]{escape(_terminal_safe(display_path))}[/cyan]"
+        )
+        console.print(header)
+
+        render_error = _render_file_write_action(project_dir, name, args)
+        if render_error:
+            console.print(f"[red]{escape(_terminal_safe(render_error))}; write denied[/red]")
+            approved = False
+        else:
+            sys.stdout.write("  [y/N] Apply  ")
+            sys.stdout.flush()
+            approved = await _read_approval_key(auto_approve)
+
+        if approved:
+            console.print("[green]applying[/green]")
+            decisions.append({"type": "approve"})
+        else:
+            console.print("[dim]cancelled[/dim]")
+            rejection_message = f"The user declined approval for `{name}`; the file was not changed."
+            if render_error == CHANGE_TOO_LARGE_MESSAGE:
+                rejection_message = f"{CHANGE_TOO_LARGE_REJECTION} The file was not changed."
+            decisions.append({
+                "type": "reject",
+                "message": rejection_message,
+            })
+    return {"decisions": decisions}
+
+
+async def _resume_file_write_interrupts(
+    project_dir: Path,
+    interrupts: Any,
+    auto_approve: bool,
+) -> Command:
+    responses = []
+    for item in interrupts:
+        response = await _decide_file_write_interrupt(project_dir, item.value, auto_approve)
+        responses.append((item.id, response))
+    return Command(resume=_combine_interrupt_responses(responses))
 
 
 async def _read_approval_key(auto_approve: bool) -> bool:
@@ -257,11 +516,95 @@ async def _read_approval_key(auto_approve: bool) -> bool:
         termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
 
 
-async def _stream_response(agent, message: str, thread_id: str, project_dir: Path, gate: ApprovalGate, auto_approve: bool = False) -> None:
+async def _stream_agent_input(
+    agent,
+    stream_input: Any,
+    config: dict[str, Any],
+    project_dir: Path,
+    gate: ApprovalGate,
+    auto_approve: bool,
+) -> None:
+    while True:
+        status = await _stream_single_input(agent, stream_input, config, project_dir, gate, auto_approve)
+        if status != "completed":
+            break
+
+        try:
+            state = await agent.aget_state(config)
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc)[:200] or type(exc).__name__
+            console.print(f"\n[red]error reading agent state: {detail}[/red]", end="")
+            break
+        if not state.interrupts:
+            break
+
+        try:
+            stream_input = await _resume_file_write_interrupts(project_dir, state.interrupts, auto_approve)
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc)[:200] or type(exc).__name__
+            console.print(f"\n[red]error processing write approval: {detail}[/red]", end="")
+            break
+    console.print()
+
+
+async def _stream_pending_file_writes(
+    agent,
+    thread_id: str,
+    project_dir: Path,
+    gate: ApprovalGate,
+    auto_approve: bool = False,
+) -> bool:
+    """Resume a thread's pending write approvals through the visible streaming path."""
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
     }
+    try:
+        state = await agent.aget_state(config)
+        if not state.interrupts:
+            return False
+        previewed_interrupts = _file_write_interrupt_snapshot(state.interrupts)
+        console.print("[yellow]pending file-write approval from the interrupted session[/yellow]")
+        stream_input = await _resume_file_write_interrupts(project_dir, state.interrupts, auto_approve)
+        latest_state = await agent.aget_state(config)
+        if _file_write_interrupt_snapshot(latest_state.interrupts) != previewed_interrupts:
+            console.print(
+                "[red]pending file-write approval changed while it was being reviewed; refusing to resume[/red]"
+            )
+            return True
+    except Exception as exc:  # noqa: BLE001
+        detail = str(exc)[:200] or type(exc).__name__
+        console.print(f"[red]error processing pending write approval: {detail}[/red]")
+        return True
+
+    await _stream_agent_input(agent, stream_input, config, project_dir, gate, auto_approve)
+    return True
+
+
+async def _stream_response(
+    agent,
+    message: str,
+    thread_id: str,
+    project_dir: Path,
+    gate: ApprovalGate,
+    auto_approve: bool = False,
+) -> None:
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": RECURSION_LIMIT,
+    }
+    stream_input: Any = {"messages": [HumanMessage(content=message)]}
+    await _stream_agent_input(agent, stream_input, config, project_dir, gate, auto_approve)
+
+
+async def _stream_single_input(
+    agent,
+    stream_input: Any,
+    config: dict[str, Any],
+    project_dir: Path,
+    gate: ApprovalGate,
+    auto_approve: bool = False,
+) -> str:
     console.print("\n[bold green]agent[/bold green]", end=" ")
     _hide_cursor()
 
@@ -321,13 +664,15 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
 
     interrupted = False
     stream_error: Exception | None = None
+    escape_pressed = asyncio.Event()
+    escape_signal_task: asyncio.Task[bool] | None = None
     stop_escape_listener = asyncio.Event()
     escape_task: asyncio.Task[bool] | None = None
     active_tool_run_ids: set[str] = set()
     streaming_text = False
     pending_tool_name: str | None = None
 
-    async def _wait_for_escape(stop_event: asyncio.Event) -> bool:
+    async def _wait_for_escape(stop_event: asyncio.Event, escape_event: asyncio.Event) -> bool:
         if not sys.stdin.isatty():
             await stop_event.wait()
             return False
@@ -343,6 +688,7 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
                     continue
                 key = os.read(fd, 1).decode("utf-8", errors="ignore")
                 if key == ESCAPE_KEY:
+                    escape_event.set()
                     return True
             return False
         finally:
@@ -358,7 +704,7 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
         _status_start("Thinking")
 
         async for event in agent.astream_events(
-            {"messages": [HumanMessage(content=message)]},
+            stream_input,
             config=config,
             version="v2",
         ):
@@ -413,13 +759,19 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
 
                 if name == "edit_prompt":
                     prompt_id = args.get("prompt_id", "")
-                    gate.expect(prompt_id)
+                    edits = args.get("edits", [])
+                    try:
+                        current_file = resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"), "current.txt")
+                        approval_key = prompt_approval_key(prompt_id, current_file.read_text(), edits)
+                    except Exception:  # noqa: BLE001
+                        approval_key = prompt_id
+                    gate.expect(approval_key)
                     prefix = "" if pending_tool_name else "\n"
                     pending_tool_name = None
                     sys.stdout.write(f"{prefix}  → {name}")
                     sys.stdout.flush()
 
-                    diff_error = _render_prompt_diff(project_dir, prompt_id, args.get("edits", []))
+                    diff_error = _render_prompt_diff(project_dir, prompt_id, edits)
 
                     # Pause escape listener so it doesn't race for stdin
                     stop_escape_listener.set()
@@ -429,13 +781,13 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
                             await escape_task
 
                     if diff_error:
-                        console.print(f"[red]{diff_error}; edit denied[/red]")
+                        console.print(f"[red]{escape(_terminal_safe(diff_error))}; edit denied[/red]")
                         approved = False
                     else:
                         sys.stdout.write("  [y/N] Apply  ")
                         sys.stdout.flush()
                         approved = await _read_approval_key(auto_approve)
-                    gate.resolve(prompt_id, approved)
+                    gate.resolve(approval_key, approved, _oversized_review_rejection(diff_error))
 
                     if approved:
                         console.print("[green]applying[/green]")
@@ -444,7 +796,7 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
 
                     # Restart escape listener
                     stop_escape_listener = asyncio.Event()
-                    escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener))
+                    escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener, escape_pressed))
                     _status_start("")
                     continue
 
@@ -471,13 +823,14 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
 
     try:
         stream_task = asyncio.create_task(_consume_stream())
-        escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener))
+        escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener, escape_pressed))
+        escape_signal_task = asyncio.create_task(escape_pressed.wait())
         done, _ = await asyncio.wait(
-            {stream_task, escape_task},
+            {stream_task, escape_signal_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        if escape_task in done and escape_task.result():
+        if escape_signal_task in done:
             interrupted = True
             stream_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -496,6 +849,10 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
             escape_task.cancel()
             with suppress(asyncio.CancelledError):
                 await escape_task
+        if escape_signal_task is not None and not escape_signal_task.done():
+            escape_signal_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await escape_signal_task
         _show_cursor()
 
     if stream_error is not None:
@@ -504,10 +861,12 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
         if len(detail) > 200:
             detail = detail[:197] + "..."
         console.print(f"\n[red]error ({type(stream_error).__name__}): {detail}[/red]", end="")
+        return "error"
 
     if interrupted:
         console.print("\n[yellow]interrupted[/yellow]", end="")
-    console.print()
+        return "interrupted"
+    return "completed"
 
 
 async def amain() -> None:
@@ -529,7 +888,10 @@ async def amain() -> None:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="Automatically approve prompt edits, including non-interactive use (use with caution)",
+        help=(
+            "Automatically approve prompt edits and filesystem writes, "
+            "including non-interactive use (use with caution)"
+        ),
     )
     parser.add_argument(
         "--thread",
@@ -569,6 +931,7 @@ async def amain() -> None:
         console.print(f"[dim]project: {project_dir}[/dim]")
         if args.thread:
             console.print(f"[dim]thread: {thread_id}[/dim] (resuming)")
+            await _stream_pending_file_writes(agent, thread_id, project_dir, gate, auto_approve=args.yes)
         console.print()
 
         session = _create_prompt_session()
@@ -623,6 +986,7 @@ async def amain() -> None:
                     else:
                         thread_id = resolved_thread_id or arg
                         console.print(f"[dim]switched to thread {thread_id}[/dim]")
+                        await _stream_pending_file_writes(agent, thread_id, project_dir, gate, auto_approve=args.yes)
                 elif cmd == "/thread":
                     console.print("[red]Usage: /thread <thread_id>[/red]")
                 else:

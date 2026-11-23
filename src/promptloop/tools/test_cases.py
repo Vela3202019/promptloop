@@ -124,7 +124,13 @@ def make_test_case_tools(project_dir: Path):
         if not tc_dir.exists() or not list(tc_dir.glob("*.json")):
             return f"No test cases found for '{prompt_id}'."
 
-        cases = sorted(tc_dir.glob("*.json"))
+        cases = []
+        for f in sorted(tc_dir.glob("*.json")):
+            try:
+                resolve_in_evals(project_dir, "test_cases", validate_id(prompt_id, "prompt_id"), f.name)
+            except ValueError:
+                continue
+            cases.append(f)
         lines = [f"Test cases for '{prompt_id}' ({len(cases)} total):"]
         for f in cases:
             tc = json.loads(f.read_text())

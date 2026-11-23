@@ -73,7 +73,7 @@ You'll get an interactive chat. Try things like:
 | `--project-dir PATH` | Project root to evaluate. It must already exist and contain the prompts you want to eval. Defaults to the current directory. |
 | `--model MODEL` | Orchestrator model. Defaults to `anthropic:claude-sonnet-4-6`. |
 | `--thread ID` | Resume a saved chat thread. Exact IDs and unambiguous prefixes are accepted; unknown or ambiguous IDs exit with an error. |
-| `--yes` | Automatically approve prompt edits, including in non-interactive use. Use with caution. |
+| `--yes` | Automatically approve prompt edits and filesystem writes, including in non-interactive use. Use with caution. |
 | `-h`, `--help` | Show help and exit. |
 
 ## Commands
@@ -86,7 +86,7 @@ You'll get an interactive chat. Try things like:
 | `/thread <id>` | Switch to a thread in-session |
 | `/quit` | Exit |
 
-Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt a streaming response.
+Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt a streaming response. If a write approval was pending when the prior session stopped, promptloop shows that approval and streams the rest of the turn before continuing.
 
 ## Quick Demo
 
@@ -123,13 +123,13 @@ The agent combines deepagents' project-confined filesystem tools with a small se
 - `run_eval`, `list_eval_runs`
 - `generate_report`, `read_report`, `compare_runs`
 
-deepagents also supplies filesystem tools such as `ls`, `read_file`, `write_file`, `edit_file`, `glob`, and `grep`. They run in the backend's virtual mode, which confines paths to the selected project directory. The eval-specific `edit_prompt` flow is protected by the terminal approval gate described above.
+deepagents also supplies filesystem tools such as `ls`, `read_file`, `write_file`, `edit_file`, `glob`, and `grep`. They run in the backend's virtual mode, which confines paths to the selected project directory. Read-only filesystem calls are ungated. `write_file` and `edit_file` pause before execution, show the target path plus a content preview or colored diff, and use the same fail-closed `[y/N]` decision as `edit_prompt`; use `edit_prompt` for registered prompts.
 
 For more detail on the agent runtime behind this project, see [The Harness Behind Deep Agent](docs/The_Harness_Behind_Deep_Agent.md).
 
 ## Security
 
-Treat prompts and model outputs as untrusted input. promptloop confines backend filesystem paths to the project directory and requires explicit approval for registered prompt edits unless `--yes` is supplied, but prompt injection can still influence agent behavior. Read the threat model and reporting instructions in [SECURITY.md](SECURITY.md).
+Treat prompts and model outputs as untrusted input. promptloop confines backend filesystem paths to the project directory and requires explicit approval for registered prompt edits and built-in filesystem writes unless `--yes` is supplied, but prompt injection can still influence agent behavior. Read the threat model and reporting instructions in [SECURITY.md](SECURITY.md).
 
 ## Development
 
