@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from promptloop.tools.report import make_report_tools
@@ -47,3 +48,27 @@ def test_compare_runs_rejects_invalid_ids(tmp_path):
     tools = {tool.name: tool for tool in make_report_tools(tmp_path)}
     output = tools["compare_runs"].invoke({"prompt_id": "../p", "run_id_a": "a", "run_id_b": "b"})
     assert output.startswith("Error: prompt_id")
+
+
+def test_generate_report_rejects_symlinked_raw_json(tmp_path):
+    target = tmp_path / "raw-target.json"
+    target.write_text(json.dumps({"results": [], "status": "complete"}))
+    run_dir = tmp_path / ".evals" / "results" / "p" / "run_a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "raw.json").symlink_to(target)
+
+    tools = {tool.name: tool for tool in make_report_tools(tmp_path)}
+    output = asyncio.run(tools["generate_report"].ainvoke({"prompt_id": "p", "run_id": "run_a"}))
+    assert output == "Error: path escapes .evals"
+
+
+def test_read_report_rejects_symlinked_report(tmp_path):
+    target = tmp_path / "report-target.md"
+    target.write_text("outside report")
+    run_dir = tmp_path / ".evals" / "results" / "p" / "run_a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.md").symlink_to(target)
+
+    tools = {tool.name: tool for tool in make_report_tools(tmp_path)}
+    output = tools["read_report"].invoke({"prompt_id": "p", "run_id": "run_a"})
+    assert output == "Error: path escapes .evals"

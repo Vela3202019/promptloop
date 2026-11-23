@@ -39,10 +39,11 @@ def make_report_tools(project_dir: Path):
         """
         try:
             prompt_id = validate_id(prompt_id, "prompt_id")
-            run_dir = resolve_in_evals(project_dir, "results", prompt_id, validate_id(run_id, "run_id"))
+            validated_run_id = validate_id(run_id, "run_id")
+            raw_file = resolve_in_evals(project_dir, "results", prompt_id, validated_run_id, "raw.json")
+            report_file = resolve_in_evals(project_dir, "results", prompt_id, validated_run_id, "report.md")
         except ValueError as e:
             return f"Error: {e}"
-        raw_file = run_dir / "raw.json"
         if not raw_file.exists():
             return f"Error: no results found for run '{run_id}'. Run run_eval first."
 
@@ -96,7 +97,7 @@ If an LLM judge gave a low score, explain what aspect of quality was lacking.
         header = f"# Prompt Eval Report: {prompt_id}\n\n**Run:** {run_id}  \n**Date:** {run_data.get('started_at', '')[:19]}  \n**Models:** {', '.join(run_data.get('models', []))}  \n**Pass rate:** {pass_rate:.0%} ({passed}/{total})  \n**Avg latency:** {avg_lat:.0f}ms\n\n---\n\n"
         full_report = header + report
 
-        (run_dir / "report.md").write_text(full_report)
+        report_file.write_text(full_report)
         return full_report
 
     @tool(parse_docstring=True)
