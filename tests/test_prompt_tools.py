@@ -115,6 +115,28 @@ def test_approved_edit_rejects_unmatched_intervening_change(tmp_path):
     assert (tmp_path / ".evals" / "prompts" / "p" / "current.txt").read_text() == "replaced beta"
 
 
+def test_approved_edit_rejects_reregistration(tmp_path):
+    first_file = tmp_path / "first.txt"
+    second_file = tmp_path / "second.txt"
+    first_file.write_text("alpha beta")
+    second_file.write_text("alpha beta")
+    gate, tools = _tools(tmp_path)
+    tools["register_prompt"].invoke({"source": "first.txt", "prompt_id": "p"})
+    edit = {"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]}
+
+    async def scenario():
+        task = asyncio.create_task(tools["edit_prompt"].ainvoke(edit))
+        await _wait_for_pending_approval(gate, "p")
+        tools["register_prompt"].invoke({"source": "second.txt", "prompt_id": "p"})
+        gate.resolve("p", True)
+        return await task
+
+    result = asyncio.run(scenario())
+
+    assert "prompt changed, re-propose" in result
+    assert second_file.read_text() == "alpha beta"
+
+
 def test_inline_prompt_ids_are_unique(tmp_path):
     _, tools = _tools(tmp_path)
     first = tools["register_prompt"].invoke({"source": "first inline prompt"})
