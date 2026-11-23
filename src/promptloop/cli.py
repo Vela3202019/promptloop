@@ -339,8 +339,6 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                 return "preview unavailable: missing or invalid new_string"
             old_string = old_string.replace("\r\n", "\n").replace("\r", "\n")
             new_string = new_string.replace("\r\n", "\n").replace("\r", "\n")
-            if old_string == new_string:
-                return "preview unavailable: old_string and new_string are identical"
             if not isinstance(replace_all, bool):
                 return "preview unavailable: replace_all must be a boolean"
             if not path.exists() or not path.is_file():
@@ -354,6 +352,10 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                 console.print(
                     "[yellow]this edit rewrites the whole file and normalizes all line endings to LF[/yellow]"
                 )
+            if old_string == new_string:
+                if not normalizes_line_endings:
+                    return "preview unavailable: old_string and new_string are identical"
+                console.print("[dim]text content is unchanged; only line endings will change[/dim]")
             if not old_string and (replace_all or current):
                 return "preview unavailable: empty old_string is only supported for an empty file without replace_all"
             count = current.count(old_string)
