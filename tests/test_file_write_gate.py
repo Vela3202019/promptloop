@@ -1,8 +1,10 @@
 import asyncio
+import json
 
 from deepagents.backends import FilesystemBackend
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
@@ -20,6 +22,31 @@ from promptloop.tools import ApprovalGate
 class FakeToolCallingChatModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, **kwargs):
         return self
+
+    def _should_stream(self, *, async_api, run_manager=None, **kwargs):
+        return True
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        result = self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        message = result.generations[0].message
+        content = message.content if isinstance(message.content, str) else ""
+        tool_call_chunks = [
+            {
+                "name": call["name"],
+                "args": json.dumps(call["args"]),
+                "id": call.get("id"),
+                "index": index,
+                "type": "tool_call_chunk",
+            }
+            for index, call in enumerate(message.tool_calls)
+        ]
+        if content or tool_call_chunks:
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(content=content, id=message.id, tool_call_chunks=tool_call_chunks)
+            )
+            if run_manager:
+                run_manager.on_llm_new_token(content, chunk=chunk)
+            yield chunk
 
 
 def _config(thread_id: str):
