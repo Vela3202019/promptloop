@@ -325,7 +325,7 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
             old_string = args.get("old_string")
             new_string = args.get("new_string")
             replace_all = args.get("replace_all", False)
-            if not isinstance(old_string, str) or not old_string:
+            if not isinstance(old_string, str):
                 return "preview unavailable: missing or invalid old_string"
             if not isinstance(new_string, str):
                 return "preview unavailable: missing or invalid new_string"

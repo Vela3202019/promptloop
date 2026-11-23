@@ -1,5 +1,6 @@
 import asyncio
 
+from deepagents.backends import FilesystemBackend
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -314,6 +315,23 @@ def test_malformed_interrupt_action_denies_without_raising(tmp_path):
         "type": "reject",
         "message": "The pending file-write action was malformed; the file was not changed.",
     }]
+
+
+def test_empty_old_string_matches_backend_for_empty_file(tmp_path):
+    target = tmp_path / "empty.txt"
+    target.write_bytes(b"")
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+
+    result = backend.edit("/empty.txt", "", "inserted")
+
+    assert result.error is None
+    assert result.occurrences == 1
+    assert target.read_text() == "inserted"
+    assert _render_file_write_action(
+        tmp_path,
+        "edit_file",
+        {"file_path": "/empty.txt", "old_string": "", "new_string": "inserted"},
+    ) is None
 
 
 def test_edit_file_preview_renders_diff(tmp_path):
