@@ -62,3 +62,21 @@ def test_infer_json_schema_valid_and_invalid_json(tmp_path):
 
     invalid = tools["infer_json_schema"].invoke({"example_output": "not json"})
     assert invalid.startswith("Error: could not parse as JSON")
+
+
+def test_delete_test_case_removes_symlink_not_target(tmp_path):
+    target_dir = tmp_path / ".evals" / "test_cases" / "other"
+    target_dir.mkdir(parents=True)
+    target = target_dir / "target.json"
+    target.write_text('{"id": "target"}')
+    case_dir = tmp_path / ".evals" / "test_cases" / "p"
+    case_dir.mkdir(parents=True)
+    link = case_dir / "linked.json"
+    link.symlink_to(target)
+
+    tools = _tools(tmp_path)
+    result = tools["delete_test_case"].invoke({"prompt_id": "p", "test_id": "linked"})
+
+    assert result == "Deleted test case 'linked'."
+    assert not link.exists()
+    assert target.read_text() == '{"id": "target"}'

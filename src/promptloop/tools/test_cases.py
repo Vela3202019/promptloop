@@ -22,6 +22,10 @@ def make_test_case_tools(project_dir: Path):
             f"{validate_id(test_id, 'test_id')}.json",
         )
 
+    def _test_case_file_for_delete(prompt_id: str, test_id: str) -> Path:
+        parent = resolve_in_evals(project_dir, "test_cases", validate_id(prompt_id, "prompt_id"))
+        return parent / f"{validate_id(test_id, 'test_id')}.json"
+
     def _eval_config_file(prompt_id: str) -> Path:
         return resolve_in_evals(project_dir, "eval_configs", f"{validate_id(prompt_id, 'prompt_id')}.json")
 
@@ -149,10 +153,10 @@ def make_test_case_tools(project_dir: Path):
             Confirmation message.
         """
         try:
-            tc_file = _test_case_file(prompt_id, test_id)
+            tc_file = _test_case_file_for_delete(prompt_id, test_id)
         except ValueError as e:
             return f"Error: {e}"
-        if not tc_file.exists():
+        if not tc_file.exists() and not tc_file.is_symlink():
             return f"Test case '{test_id}' not found for prompt '{prompt_id}'."
         tc_file.unlink()
         return f"Deleted test case '{test_id}'."
