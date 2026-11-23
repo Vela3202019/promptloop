@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import copy
 import difflib
 import os
 import select
@@ -379,10 +380,15 @@ def _interrupt_action_requests(value: Any) -> list[Any]:
     return action_requests
 
 
-def _combine_interrupt_responses(responses: list[tuple[str, dict[str, Any]]]) -> Any:
-    if len(responses) == 1:
-        return responses[0][1]
+def _combine_interrupt_responses(responses: list[tuple[str, dict[str, Any]]]) -> dict[str, dict[str, Any]]:
     return {interrupt_id: response for interrupt_id, response in responses}
+
+
+def _file_write_interrupt_snapshot(interrupts: Any) -> tuple[Any, ...]:
+    return tuple(
+        (item.id, tuple(copy.deepcopy(action) for action in _interrupt_action_requests(item.value)))
+        for item in interrupts
+    )
 
 
 async def _decide_file_write_interrupt(
@@ -520,8 +526,15 @@ async def _stream_pending_file_writes(
         state = await agent.aget_state(config)
         if not state.interrupts:
             return False
+        previewed_interrupts = _file_write_interrupt_snapshot(state.interrupts)
         console.print("[yellow]pending file-write approval from the interrupted session[/yellow]")
         stream_input = await _resume_file_write_interrupts(project_dir, state.interrupts, auto_approve)
+        latest_state = await agent.aget_state(config)
+        if _file_write_interrupt_snapshot(latest_state.interrupts) != previewed_interrupts:
+            console.print(
+                "[red]pending file-write approval changed while it was being reviewed; refusing to resume[/red]"
+            )
+            return True
     except Exception as exc:  # noqa: BLE001
         detail = str(exc)[:200] or type(exc).__name__
         console.print(f"[red]error processing pending write approval: {detail}[/red]")

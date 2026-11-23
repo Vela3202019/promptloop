@@ -1,5 +1,7 @@
 import asyncio
+import copy
 import json
+from types import SimpleNamespace
 
 from deepagents.backends import FilesystemBackend
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -311,6 +313,59 @@ def test_pending_interrupt_streams_resumed_turn(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "approval required" in output
     assert "done" in output
+
+
+def test_pending_interrupt_change_refuses_resume(tmp_path, capsys):
+    class StateReplacingAgent:
+        def __init__(self, agent):
+            self.agent = agent
+            self.state_calls = 0
+
+        async def aget_state(self, config):
+            self.state_calls += 1
+            state = await self.agent.aget_state(config)
+            if self.state_calls == 1:
+                return state
+            item = state.interrupts[0]
+            value = copy.deepcopy(item.value)
+            value["action_requests"][0]["args"]["content"] = "replacement content"
+            replacement = SimpleNamespace(id=item.id, value=value)
+            return SimpleNamespace(interrupts=(replacement,))
+
+        def __getattr__(self, name):
+            return getattr(self.agent, name)
+
+    async def scenario():
+        target = tmp_path / "out.txt"
+        checkpointer = MemorySaver()
+        first_agent = _make_agent(
+            tmp_path,
+            [AIMessage(content="", tool_calls=[_write_call()]), AIMessage(content="unreachable")],
+            checkpointer,
+        )
+        config = _config("changed-pending")
+        await first_agent.ainvoke({"messages": [HumanMessage(content="write")]}, config=config)
+
+        restarted_agent = _make_agent(tmp_path, [AIMessage(content="done")], checkpointer)
+        replacing_agent = StateReplacingAgent(restarted_agent)
+        handled = await _stream_pending_file_writes(
+            replacing_agent,
+            "changed-pending",
+            tmp_path,
+            ApprovalGate(),
+            auto_approve=True,
+        )
+
+        assert handled is True
+        assert replacing_agent.state_calls == 2
+        assert not target.exists()
+        assert len((await restarted_agent.aget_state(config)).interrupts) == 1
+
+    asyncio.run(scenario())
+    output = capsys.readouterr().out
+    assert "changed while it was being reviewed" in output
+    assert "refusing to resume" in output
+    assert "done" not in output
 
 
 def test_approval_key_non_tty_denies_and_yes_approves():
