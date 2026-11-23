@@ -318,7 +318,7 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                     console.print()
             else:
                 console.print(f"[dim]new file ({len(content)} characters)[/dim]")
-                lines = content.splitlines()
+                lines = content.split("\n")
                 truncated = len(content) > 1200 or len(lines) > 30
                 preview = "\n".join(lines[:30])[:1200]
                 sys.stdout.write("  proposed content:\n")
