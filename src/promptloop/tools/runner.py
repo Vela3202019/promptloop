@@ -341,8 +341,9 @@ def make_runner_tools(project_dir: Path):
             has_report = (run_dir / "report.md").exists()
             models = ", ".join(data.get("models", []))
             v = data.get("prompt_version", "?")
+            run_status = data.get("status", "complete")
             lines.append(
-                f"  {run_dir.name}  v{v}  {passed}/{total} passed  [{models}]"
+                f"  {run_dir.name}  v{v}  {passed}/{total} passed  [{models}]  [{run_status}]"
                 + (" [report]" if has_report else "")
             )
         return "\n".join(lines)

@@ -48,6 +48,9 @@ def make_report_tools(project_dir: Path):
             return f"Error: no results found for run '{run_id}'. Run run_eval first."
 
         run_data = json.loads(raw_file.read_text())
+        status = run_data.get("status", "complete")
+        if status != "complete":
+            return f"Error: run '{run_id}' has status '{status}'; generate_report requires a completed run."
         results = run_data["results"]
 
         passed = sum(1 for r in results if result_passed(r))
@@ -158,6 +161,12 @@ If an LLM judge gave a low score, explain what aspect of quality was lacking.
             return f"Run '{run_id_a}' not found."
         if not b:
             return f"Run '{run_id_b}' not found."
+        status_a = a.get("status", "complete")
+        status_b = b.get("status", "complete")
+        if status_a != "complete":
+            return f"Run '{run_id_a}' has status '{status_a}'; only completed runs can be compared."
+        if status_b != "complete":
+            return f"Run '{run_id_b}' has status '{status_b}'; only completed runs can be compared."
 
         def _stats(data: dict[str, Any]) -> dict[str, Any]:
             results = data["results"]
