@@ -75,6 +75,8 @@ CHAT_DB_NAME = "chat.db"
 ESCAPE_KEY = "\x1b"
 MAX_FILE_PREVIEW_BYTES = 64 * 1024
 MAX_DIFF_LINES = 200
+CHANGE_TOO_LARGE_MESSAGE = "change too large to review; split it into smaller changes"
+CHANGE_TOO_LARGE_REJECTION = "The change is too large to review; split it into smaller edits."
 
 
 def _chat_db_path(project_dir: Path) -> Path:
@@ -247,7 +249,7 @@ def _terminal_safe(text: str) -> str:
 
 def _print_diff_lines(diff_lines: list[str]) -> str | None:
     if len(diff_lines) > MAX_DIFF_LINES:
-        return "change too large to review; split it into smaller changes"
+        return CHANGE_TOO_LARGE_MESSAGE
     for line in diff_lines:
         line = _terminal_safe(line.rstrip("\n"))
         rendered = escape(line)
@@ -261,6 +263,12 @@ def _print_diff_lines(diff_lines: list[str]) -> str | None:
             console.print(f"[cyan]{rendered}[/cyan]")
         else:
             console.print(f"[dim]{rendered}[/dim]")
+    return None
+
+
+def _oversized_review_rejection(render_error: str | None) -> str | None:
+    if render_error == CHANGE_TOO_LARGE_MESSAGE:
+        return CHANGE_TOO_LARGE_REJECTION
     return None
 
 
@@ -462,9 +470,12 @@ async def _decide_file_write_interrupt(
             decisions.append({"type": "approve"})
         else:
             console.print("[dim]cancelled[/dim]")
+            rejection_message = f"The user declined approval for `{name}`; the file was not changed."
+            if render_error == CHANGE_TOO_LARGE_MESSAGE:
+                rejection_message = f"{CHANGE_TOO_LARGE_REJECTION} The file was not changed."
             decisions.append({
                 "type": "reject",
-                "message": f"The user declined approval for `{name}`; the file was not changed.",
+                "message": rejection_message,
             })
     return {"decisions": decisions}
 
@@ -773,7 +784,7 @@ async def _stream_single_input(
                         sys.stdout.write("  [y/N] Apply  ")
                         sys.stdout.flush()
                         approved = await _read_approval_key(auto_approve)
-                    gate.resolve(approval_key, approved)
+                    gate.resolve(approval_key, approved, _oversized_review_rejection(diff_error))
 
                     if approved:
                         console.print("[green]applying[/green]")

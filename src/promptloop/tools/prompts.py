@@ -34,6 +34,7 @@ class ApprovalGate:
         self._decisions: dict[str, bool] = {}
         self._expected: set[str] = set()
         self._waiters: dict[str, list[_ApprovalWaiter]] = {}
+        self._rejection_messages: dict[str, str] = {}
         self._listener_timeout = listener_timeout
         self._decision_timeout = decision_timeout
 
@@ -42,8 +43,12 @@ class ApprovalGate:
         for waiter in self._waiters.get(key, []):
             waiter.listener_seen = True
 
-    def resolve(self, key: str, approved: bool) -> None:
+    def resolve(self, key: str, approved: bool, rejection_message: str | None = None) -> None:
         self._expected.discard(key)
+        if approved or rejection_message is None:
+            self._rejection_messages.pop(key, None)
+        else:
+            self._rejection_messages[key] = rejection_message
         waiters = self._waiters.get(key)
         if waiters:
             waiter = waiters.pop(0)
@@ -54,8 +59,12 @@ class ApprovalGate:
         else:
             self._decisions[key] = approved
 
+    def rejection_message(self, key: str) -> str | None:
+        return self._rejection_messages.pop(key, None)
+
     def drop(self, key: str) -> None:
         self._decisions.pop(key, None)
+        self._rejection_messages.pop(key, None)
 
     async def consume(self, key: str) -> bool:
         if key in self._decisions:
@@ -404,6 +413,9 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             if error:
                 return error
             if not await gate.consume(approval_key):
+                rejection_message = gate.rejection_message(approval_key)
+                if rejection_message:
+                    return f"Edit to '{prompt_id}' cancelled. {rejection_message}"
                 return f"Edit to '{prompt_id}' cancelled by user."
 
             latest_content = current_file.read_text()
