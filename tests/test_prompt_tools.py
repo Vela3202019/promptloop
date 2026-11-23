@@ -54,7 +54,7 @@ def test_prompt_register_edit_history_and_approval_gate(tmp_path):
     assert _ainvoke(tools["edit_prompt"], edit) == "Edit to 'p' cancelled by user."
     assert current.read_text() == "alpha beta"
 
-    gate.resolve(_approval_key(edit["edits"]), True)
+    gate.resolve(approval_key, True)
     assert "Prompt 'p' is now v2" in _ainvoke(tools["edit_prompt"], edit)
     assert current.read_text() == "omega beta"
 
@@ -69,7 +69,9 @@ def test_prompt_register_edit_history_and_approval_gate(tmp_path):
 async def _wait_for_pending_approval(gate, prompt_id):
     for _ in range(100):
         if gate._waiters:
-            return
+            key = next(iter(gate._waiters))
+            gate.expect(key)
+            return key
         await asyncio.sleep(0)
     raise AssertionError("edit did not reach approval gate")
 
@@ -90,9 +92,9 @@ def test_approved_edit_reapplies_after_intervening_change(tmp_path):
 
     async def scenario():
         task = asyncio.create_task(tools["edit_prompt"].ainvoke(edit))
-        await _wait_for_pending_approval(gate, "p")
+        approval_key = await _wait_for_pending_approval(gate, "p")
         _intervening_prompt_change(tmp_path, "p", "alpha beta gamma")
-        gate.resolve(_approval_key(edit["edits"]), True)
+        gate.resolve(approval_key, True)
         return await task
 
     result = asyncio.run(scenario())
@@ -108,9 +110,9 @@ def test_approved_edit_rejects_unmatched_intervening_change(tmp_path):
 
     async def scenario():
         task = asyncio.create_task(tools["edit_prompt"].ainvoke(edit))
-        await _wait_for_pending_approval(gate, "p")
+        approval_key = await _wait_for_pending_approval(gate, "p")
         _intervening_prompt_change(tmp_path, "p", "replaced beta")
-        gate.resolve(_approval_key(edit["edits"]), True)
+        gate.resolve(approval_key, True)
         return await task
 
     result = asyncio.run(scenario())
@@ -130,9 +132,9 @@ def test_approved_edit_rejects_reregistration(tmp_path):
 
     async def scenario():
         task = asyncio.create_task(tools["edit_prompt"].ainvoke(edit))
-        await _wait_for_pending_approval(gate, "p")
+        approval_key = await _wait_for_pending_approval(gate, "p")
         tools["register_prompt"].invoke({"source": "second.txt", "prompt_id": "p"})
-        gate.resolve(_approval_key(edit["edits"]), True)
+        gate.resolve(approval_key, True)
         return await task
 
     result = asyncio.run(scenario())
@@ -245,7 +247,7 @@ def test_approved_edit_updates_source_file_inside_project(tmp_path):
     gate, tools = _tools(tmp_path)
     assert "Registered prompt 'p'" in tools["register_prompt"].invoke({"source": "prompt.txt", "prompt_id": "p"})
     edit = {"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]}
-    gate.resolve(_approval_key(edit["edits"]), True)
+    gate.resolve(approval_key, True)
     result = _ainvoke(tools["edit_prompt"], edit)
     assert "Source file updated" in result
     assert source.read_text() == "omega beta"
