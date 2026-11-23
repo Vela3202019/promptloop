@@ -153,17 +153,30 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if "\n" in source or len(source) > 240:
             return None
 
-        p = Path(source)
-        if not p.is_absolute():
-            p = project_dir / p
+        def _is_file(path: Path) -> bool:
+            try:
+                return path.exists() and path.is_file()
+            except OSError:
+                return False
 
-        try:
-            exists = p.exists() and p.is_file()
-        except OSError:
-            return None
-        if not exists:
-            return None
-        return resolve_in_project(project_dir, p)
+        raw_path = Path(source)
+        physical_path = raw_path if raw_path.is_absolute() else project_dir / raw_path
+        physical_exists = _is_file(physical_path)
+        if physical_exists:
+            try:
+                return resolve_in_project(project_dir, physical_path)
+            except ValueError:
+                if not raw_path.is_absolute():
+                    raise
+
+        if raw_path.is_absolute():
+            virtual_path = project_dir / str(raw_path).lstrip("/")
+            if _is_file(virtual_path):
+                return resolve_in_project(project_dir, virtual_path)
+
+        if physical_exists:
+            return resolve_in_project(project_dir, physical_path)
+        return None
 
     def _diff(current: str, proposed: str, prompt_id: str) -> str:
         diff_lines = list(difflib.unified_diff(

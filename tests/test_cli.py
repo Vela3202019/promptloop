@@ -32,3 +32,5 @@ def test_system_prompt_formats_without_keyerror():
     rendered = SYSTEM_PROMPT.format(project_dir="/tmp/project")
     assert "`{old, new}` pairs" in rendered
     assert "one directory per prompt" in rendered
+    assert "virtual project-relative paths" in rendered
+    assert "Never use the physical absolute path" in rendered

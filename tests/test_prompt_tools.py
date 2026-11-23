@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from promptloop.tools.prompts import ApprovalGate, make_prompt_tools
 
@@ -89,6 +90,19 @@ def test_duplicate_source_file_stems_get_distinct_ids(tmp_path):
     prompts_dir = tmp_path / ".evals" / "prompts"
     assert (prompts_dir / "shared" / "current.txt").read_text() == "first prompt"
     assert (prompts_dir / "shared_2" / "current.txt").read_text() == "second prompt"
+
+
+def test_register_prompt_accepts_virtual_project_path(tmp_path):
+    prompt_file = tmp_path / "src" / "prompts" / "virtual.txt"
+    prompt_file.parent.mkdir(parents=True)
+    prompt_file.write_text("virtual path prompt")
+
+    _, tools = _tools(tmp_path)
+    result = tools["register_prompt"].invoke({"source": "/src/prompts/virtual.txt"})
+
+    assert "Registered prompt 'virtual' (v1)" in result
+    meta = json.loads((tmp_path / ".evals" / "prompts" / "virtual" / "meta.json").read_text())
+    assert meta["source_path"] == str(prompt_file.resolve())
 
 
 def test_prompt_id_traversal_is_rejected(tmp_path):
