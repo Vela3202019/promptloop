@@ -108,8 +108,8 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         history_dir.mkdir(exist_ok=True)
 
         version = _next_version(history_dir)
-        (prompt_dir / "current.txt").write_text(content)
-        (history_dir / f"v{version}.txt").write_text(content)
+        _prompt_artifact(prompt_id, "current.txt").write_text(content)
+        _prompt_artifact(prompt_id, "history", f"v{version}.txt").write_text(content)
 
         meta = {
             "source_path": source_path,
@@ -118,7 +118,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             "registered_at": datetime.now().isoformat(),
             "version": version,
         }
-        (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        _prompt_artifact(prompt_id, "meta.json").write_text(json.dumps(meta, indent=2))
         return version, prompt_dir
 
     def _inline_prompt_id() -> str:
@@ -126,6 +126,9 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
 
     def _prompt_dir(prompt_id: str) -> Path:
         return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"))
+
+    def _prompt_artifact(prompt_id: str, *parts: str) -> Path:
+        return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"), *parts)
 
     def _dedupe_file_prompt_id(prompt_id: str, source_path: str) -> str:
         candidate = prompt_id
@@ -137,7 +140,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
                 return candidate
             if not prompt_dir.exists():
                 return candidate
-            meta_file = prompt_dir / "meta.json"
+            meta_file = _prompt_artifact(prompt_id, "meta.json")
             existing_source = None
             if meta_file.exists():
                 try:
@@ -220,11 +223,11 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
 
-        current = (prompt_dir / "current.txt").read_text()
+        current = _prompt_artifact(prompt_id, "current.txt").read_text()
         if current == new_content:
             return "No changes detected between current and proposed content."
 
-        meta = json.loads((prompt_dir / "meta.json").read_text())
+        meta = json.loads(_prompt_artifact(prompt_id, "meta.json").read_text())
         new_version = meta["version"] + 1
         source_path_value = meta.get("source_path")
         if not source_path_value:
@@ -240,12 +243,12 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             source_note = f"Source file updated at {source_path}."
 
         history_dir = prompt_dir / "history"
-        (history_dir / f"v{new_version}.txt").write_text(new_content)
-        (prompt_dir / "current.txt").write_text(new_content)
+        _prompt_artifact(prompt_id, "history", f"v{new_version}.txt").write_text(new_content)
+        _prompt_artifact(prompt_id, "current.txt").write_text(new_content)
 
         meta["version"] = new_version
         meta["updated_at"] = datetime.now().isoformat()
-        (prompt_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        _prompt_artifact(prompt_id, "meta.json").write_text(json.dumps(meta, indent=2))
 
         return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
 
@@ -314,7 +317,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not registered. Use register_prompt first."
-        meta = json.loads((prompt_dir / "meta.json").read_text())
+        meta = json.loads(_prompt_artifact(prompt_id, "meta.json").read_text())
         content = (prompt_dir / "current.txt").read_text()
         source = meta.get("source_path") or "inline prompt"
         return f"Prompt '{prompt_id}' — v{meta['version']} — source: {source}\n\n{content}"
@@ -362,8 +365,8 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
-        current_file = prompt_dir / "current.txt"
-        meta_file = prompt_dir / "meta.json"
+        current_file = _prompt_artifact(prompt_id, "current.txt")
+        meta_file = _prompt_artifact(prompt_id, "meta.json")
         current = current_file.read_text()
         base_meta = json.loads(meta_file.read_text())
         base_version = base_meta.get("version")
@@ -403,7 +406,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if not history_dir.exists():
             return f"No history found for '{prompt_id}'."
 
-        meta = json.loads((prompt_dir / "meta.json").read_text())
+        meta = json.loads(_prompt_artifact(prompt_id, "meta.json").read_text())
         versioned_files = []
         for path in history_dir.glob("v*.txt"):
             num = _version_number(path)
