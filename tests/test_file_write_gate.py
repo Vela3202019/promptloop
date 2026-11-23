@@ -327,6 +327,8 @@ def test_empty_old_string_matches_backend_for_empty_file(tmp_path):
     assert result.error is None
     assert result.occurrences == 1
     assert target.read_text() == "inserted"
+
+    target.write_bytes(b"")
     assert _render_file_write_action(
         tmp_path,
         "edit_file",
