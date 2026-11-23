@@ -548,7 +548,11 @@ async def amain() -> None:
     else:
         thread_id = str(uuid.uuid4())
 
-    # Ensure .evals exists for chat DB
+    # Ensure .evals exists for chat DB, and never follow a symlink outside the project.
+    try:
+        resolve_in_evals(project_dir)
+    except ValueError as e:
+        parser.error(str(e))
     (project_dir / ".evals").mkdir(parents=True, exist_ok=True)
     db_path = project_dir / ".evals" / CHAT_DB_NAME
 

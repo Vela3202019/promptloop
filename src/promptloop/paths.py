@@ -14,7 +14,12 @@ def validate_id(value: str, kind: str) -> str:
 
 
 def resolve_in_evals(project_dir: Path, *parts: str) -> Path:
+    project_root = project_dir.resolve()
     root = (project_dir / ".evals").resolve()
+    try:
+        root.relative_to(project_root)
+    except ValueError:
+        raise ValueError(".evals escapes project directory") from None
     candidate = root.joinpath(*parts).resolve()
     try:
         candidate.relative_to(root)

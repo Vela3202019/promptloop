@@ -23,3 +23,14 @@ def test_resolve_in_evals_rejects_symlink_escape(tmp_path):
 
     with pytest.raises(ValueError, match="escapes"):
         resolve_in_evals(tmp_path, "results", "prompt", "run")
+
+
+def test_resolve_in_evals_rejects_evals_root_symlink_escape(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside-evals"
+    outside.mkdir()
+    (project / ".evals").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match=r"\.evals escapes project directory"):
+        resolve_in_evals(project)
