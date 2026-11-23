@@ -491,5 +491,6 @@ def test_large_edit_preview_denied_and_diff_output_capped(tmp_path, capsys):
         {"file_path": "/large.txt", "old_string": "a", "new_string": "b"},
     ) == "preview unavailable: file is too large to preview safely"
 
-    _print_diff_lines(["+x\n"] * (MAX_DIFF_LINES + 1))
-    assert "diff truncated" in capsys.readouterr().out
+    assert _print_diff_lines(["+x\n"] * (MAX_DIFF_LINES + 1)) == (
+        "change too large to review; split it into smaller changes"
+    )

@@ -221,7 +221,9 @@ def _render_prompt_diff(project_dir: Path, prompt_id: str, edits: list[dict]) ->
             return "diff unavailable: no changes detected"
 
         console.print()
-        _print_diff_lines(diff_lines)
+        diff_error = _print_diff_lines(diff_lines)
+        if diff_error:
+            return diff_error
         console.print()
     except Exception as e:  # noqa: BLE001
         return f"diff unavailable: {e}"
@@ -315,7 +317,9 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                         n=3,
                     ))
                     console.print()
-                    _print_diff_lines(diff_lines)
+                    diff_error = _print_diff_lines(diff_lines)
+                    if diff_error:
+                        return diff_error
                     console.print()
             else:
                 console.print(f"[dim]new file ({len(content)} characters)[/dim]")
@@ -379,7 +383,9 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                 n=3,
             ))
             console.print()
-            _print_diff_lines(diff_lines)
+            diff_error = _print_diff_lines(diff_lines)
+            if diff_error:
+                return diff_error
             console.print()
             return None
 
