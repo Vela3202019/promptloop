@@ -72,6 +72,8 @@ RECURSION_LIMIT = 100
 
 CHAT_DB_NAME = "chat.db"
 ESCAPE_KEY = "\x1b"
+MAX_FILE_PREVIEW_BYTES = 64 * 1024
+MAX_DIFF_LINES = 200
 
 
 def _chat_db_path(project_dir: Path) -> Path:
@@ -241,7 +243,8 @@ def _terminal_safe(text: str) -> str:
 
 
 def _print_diff_lines(diff_lines: list[str]) -> None:
-    for line in diff_lines:
+    truncated = len(diff_lines) > MAX_DIFF_LINES
+    for line in diff_lines[:MAX_DIFF_LINES]:
         line = _terminal_safe(line.rstrip("\n"))
         rendered = escape(line)
         if line.startswith(("+++", "---")):
@@ -254,6 +257,8 @@ def _print_diff_lines(diff_lines: list[str]) -> None:
             console.print(f"[cyan]{rendered}[/cyan]")
         else:
             console.print(f"[dim]{rendered}[/dim]")
+    if truncated:
+        console.print(f"[dim]… diff truncated after {MAX_DIFF_LINES} lines[/dim]")
 
 
 def _virtual_project_path(project_dir: Path, file_path: str) -> Path:
@@ -295,6 +300,8 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                     "[yellow]write_file cannot overwrite existing files; "
                     "approval will return a tool error. Use edit_file instead.[/yellow]"
                 )
+                if path.stat().st_size > MAX_FILE_PREVIEW_BYTES or len(content.encode()) > MAX_FILE_PREVIEW_BYTES:
+                    return "preview unavailable: file is too large to diff safely"
                 current = path.read_text(encoding="utf-8")
                 if current == content:
                     console.print("[dim]content is unchanged[/dim]")
@@ -339,17 +346,24 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
             if not path.exists() or not path.is_file():
                 return "preview unavailable: target file not found"
             raw_content = path.read_bytes()
+            if len(raw_content) > MAX_FILE_PREVIEW_BYTES:
+                return "preview unavailable: file is too large to preview safely"
             normalizes_line_endings = b"\r" in raw_content
             current = raw_content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             if normalizes_line_endings:
                 console.print(
                     "[yellow]this edit rewrites the whole file and normalizes all line endings to LF[/yellow]"
                 )
+            if not old_string and (replace_all or current):
+                return "preview unavailable: empty old_string is only supported for an empty file without replace_all"
             count = current.count(old_string)
             if count == 0:
                 return "preview unavailable: old_string was not found"
             if count != 1 and not replace_all:
                 return f"preview unavailable: old_string matches {count} places"
+            estimated_size = len(current) + count * max(0, len(new_string) - len(old_string))
+            if estimated_size > MAX_FILE_PREVIEW_BYTES:
+                return "preview unavailable: edit result is too large to preview safely"
             if replace_all:
                 proposed = current.replace(old_string, new_string)
             else:

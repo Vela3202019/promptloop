@@ -12,7 +12,10 @@ from langgraph.types import Command
 
 from promptloop.agent import create_eval_agent
 from promptloop.cli import (
+    MAX_DIFF_LINES,
+    MAX_FILE_PREVIEW_BYTES,
     _decide_file_write_interrupt,
+    _print_diff_lines,
     _read_approval_key,
     _render_file_write_action,
     _stream_pending_file_writes,
@@ -451,3 +454,41 @@ def test_edit_file_preview_renders_diff(tmp_path):
     )
 
     assert error is None
+
+
+def test_empty_old_string_nonempty_or_replace_all_denied(tmp_path):
+    backend_target = tmp_path / "backend.txt"
+    backend_target.write_text("abc")
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    result = backend.edit("/backend.txt", "", "X", True)
+    assert result.error is None
+    assert backend_target.read_text() == "XaXbXcX"
+
+    target = tmp_path / "preview.txt"
+    target.write_text("abc")
+    for replace_all in (False, True):
+        assert _render_file_write_action(
+            tmp_path,
+            "edit_file",
+            {"file_path": "/preview.txt", "old_string": "", "new_string": "X", "replace_all": replace_all},
+        ) == "preview unavailable: empty old_string is only supported for an empty file without replace_all"
+
+    target.write_bytes(b"")
+    assert _render_file_write_action(
+        tmp_path,
+        "edit_file",
+        {"file_path": "/preview.txt", "old_string": "", "new_string": "X", "replace_all": True},
+    ) == "preview unavailable: empty old_string is only supported for an empty file without replace_all"
+
+
+def test_large_edit_preview_denied_and_diff_output_capped(tmp_path, capsys):
+    target = tmp_path / "large.txt"
+    target.write_text("a" * (MAX_FILE_PREVIEW_BYTES + 1))
+    assert _render_file_write_action(
+        tmp_path,
+        "edit_file",
+        {"file_path": "/large.txt", "old_string": "a", "new_string": "b"},
+    ) == "preview unavailable: file is too large to preview safely"
+
+    _print_diff_lines(["+x\n"] * (MAX_DIFF_LINES + 1))
+    assert "diff truncated" in capsys.readouterr().out
