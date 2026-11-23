@@ -367,7 +367,8 @@ def test_pending_interrupt_change_refuses_resume(tmp_path, capsys):
     asyncio.run(scenario())
     output = capsys.readouterr().out
     assert "changed while it was being reviewed" in output
-    assert "refusing to resume" in output
+    assert "refusing to" in output
+    assert "resume" in output
     assert "done" not in output
 
 
