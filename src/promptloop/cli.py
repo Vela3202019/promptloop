@@ -664,13 +664,15 @@ async def _stream_single_input(
 
     interrupted = False
     stream_error: Exception | None = None
+    escape_pressed = asyncio.Event()
+    escape_signal_task: asyncio.Task[bool] | None = None
     stop_escape_listener = asyncio.Event()
     escape_task: asyncio.Task[bool] | None = None
     active_tool_run_ids: set[str] = set()
     streaming_text = False
     pending_tool_name: str | None = None
 
-    async def _wait_for_escape(stop_event: asyncio.Event) -> bool:
+    async def _wait_for_escape(stop_event: asyncio.Event, escape_event: asyncio.Event) -> bool:
         if not sys.stdin.isatty():
             await stop_event.wait()
             return False
@@ -686,6 +688,7 @@ async def _stream_single_input(
                     continue
                 key = os.read(fd, 1).decode("utf-8", errors="ignore")
                 if key == ESCAPE_KEY:
+                    escape_event.set()
                     return True
             return False
         finally:
@@ -793,7 +796,7 @@ async def _stream_single_input(
 
                     # Restart escape listener
                     stop_escape_listener = asyncio.Event()
-                    escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener))
+                    escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener, escape_pressed))
                     _status_start("")
                     continue
 
@@ -820,13 +823,14 @@ async def _stream_single_input(
 
     try:
         stream_task = asyncio.create_task(_consume_stream())
-        escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener))
+        escape_task = asyncio.create_task(_wait_for_escape(stop_escape_listener, escape_pressed))
+        escape_signal_task = asyncio.create_task(escape_pressed.wait())
         done, _ = await asyncio.wait(
-            {stream_task, escape_task},
+            {stream_task, escape_signal_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        if escape_task in done and escape_task.result():
+        if escape_signal_task in done:
             interrupted = True
             stream_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -845,6 +849,10 @@ async def _stream_single_input(
             escape_task.cancel()
             with suppress(asyncio.CancelledError):
                 await escape_task
+        if escape_signal_task is not None and not escape_signal_task.done():
+            escape_signal_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await escape_signal_task
         _show_cursor()
 
     if stream_error is not None:
