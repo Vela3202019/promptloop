@@ -54,7 +54,7 @@ def test_prompt_register_edit_history_and_approval_gate(tmp_path):
     assert _ainvoke(tools["edit_prompt"], edit) == "Edit to 'p' cancelled by user."
     assert current.read_text() == "alpha beta"
 
-    gate.resolve(approval_key, True)
+    gate.resolve(_approval_key(edit["edits"]), True)
     assert "Prompt 'p' is now v2" in _ainvoke(tools["edit_prompt"], edit)
     assert current.read_text() == "omega beta"
 
@@ -247,7 +247,7 @@ def test_approved_edit_updates_source_file_inside_project(tmp_path):
     gate, tools = _tools(tmp_path)
     assert "Registered prompt 'p'" in tools["register_prompt"].invoke({"source": "prompt.txt", "prompt_id": "p"})
     edit = {"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]}
-    gate.resolve(approval_key, True)
+    gate.resolve(_approval_key(edit["edits"]), True)
     result = _ainvoke(tools["edit_prompt"], edit)
     assert "Source file updated" in result
     assert source.read_text() == "omega beta"
