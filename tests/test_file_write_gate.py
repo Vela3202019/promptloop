@@ -334,6 +334,28 @@ def test_empty_old_string_matches_backend_for_empty_file(tmp_path):
     ) is None
 
 
+def test_crlf_edit_backend_normalizes_and_preview_warns(tmp_path, capsys):
+    target = tmp_path / "crlf.txt"
+    target.write_bytes(b"alpha\r\nbeta\r\n")
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+
+    result = backend.edit("/crlf.txt", "alpha", "omega")
+
+    assert result.error is None
+    assert target.read_bytes() == b"omega\nbeta\n"
+
+    capsys.readouterr()
+    target.write_bytes(b"alpha\r\nbeta\r\n")
+    error = _render_file_write_action(
+        tmp_path,
+        "edit_file",
+        {"file_path": "/crlf.txt", "old_string": "alpha", "new_string": "omega"},
+    )
+
+    assert error is None
+    assert "normalizes all line endings to LF" in capsys.readouterr().out
+
+
 def test_edit_file_preview_renders_diff(tmp_path):
     target = tmp_path / "existing.txt"
     target.write_text("alpha beta\n")

@@ -337,7 +337,13 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                 return "preview unavailable: replace_all must be a boolean"
             if not path.exists() or not path.is_file():
                 return "preview unavailable: target file not found"
-            current = path.read_text(encoding="utf-8")
+            raw_content = path.read_bytes()
+            normalizes_line_endings = b"\r" in raw_content
+            current = raw_content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            if normalizes_line_endings:
+                console.print(
+                    "[yellow]this edit rewrites the whole file and normalizes all line endings to LF[/yellow]"
+                )
             count = current.count(old_string)
             if count == 0:
                 return "preview unavailable: old_string was not found"
