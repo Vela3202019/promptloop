@@ -28,6 +28,26 @@ promptloop = "promptloop.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/promptloop"]
 
+[dependency-groups]
+dev = [
+    "basedpyright>=1.36.0",
+    "pytest>=8.3.0",
+    "ruff>=0.15.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["I", "UP", "B", "F", "E", "SIM", "BLE", "PIE", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.basedpyright]
 venvPath = "."
 venv = ".venv"
+typeCheckingMode = "standard"

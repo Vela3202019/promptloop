@@ -1,14 +1,14 @@
 import json
 import uuid
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
 from langchain_core.tools import tool
 
 from ..paths import resolve_in_evals, validate_id
 
 
 def make_test_case_tools(project_dir: Path):
-    test_cases_dir = resolve_in_evals(project_dir, "test_cases")
     eval_configs_dir = resolve_in_evals(project_dir, "eval_configs")
 
     def _test_case_dir(prompt_id: str) -> Path:

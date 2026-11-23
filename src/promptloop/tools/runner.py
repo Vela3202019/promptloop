@@ -6,7 +6,7 @@ import uuid
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -19,10 +19,6 @@ DEFAULT_MAX_CONCURRENCY = 4
 
 
 def make_runner_tools(project_dir: Path):
-    prompts_dir = resolve_in_evals(project_dir, "prompts")
-    test_cases_dir = resolve_in_evals(project_dir, "test_cases")
-    eval_configs_dir = resolve_in_evals(project_dir, "eval_configs")
-    results_dir = resolve_in_evals(project_dir, "results")
 
     def _get_model(model_cache: dict[str, Any], model_name: str) -> Any:
         if model_name not in model_cache:
@@ -56,7 +52,7 @@ def make_runner_tools(project_dir: Path):
         judge_prompt_template: str,
         actual_output: str,
         user_input: str,
-        expected_output: Optional[str],
+        expected_output: str | None,
         judge_model: str,
     ) -> dict:
         prompt = judge_prompt_template.format(
@@ -76,10 +72,11 @@ def make_runner_tools(project_dir: Path):
             score = raw_score if raw_score <= 1 else raw_score / 10.0
             score = min(max(score, 0.0), 1.0)
 
-        if score is None:
-            detail = "failed: could not parse a numeric score; judge response: " + raw[:500]
-        else:
-            detail = raw[:600]
+        detail = (
+            "failed: could not parse a numeric score; judge response: " + raw[:500]
+            if score is None
+            else raw[:600]
+        )
 
         return {
             "type": "llm_judge",
@@ -143,7 +140,7 @@ def make_runner_tools(project_dir: Path):
 
             result["metrics"] = sync_results + list(judge_results)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - isolate per-test model/metric failures
             result["error"] = str(e)
 
         return result
@@ -151,13 +148,13 @@ def make_runner_tools(project_dir: Path):
     @tool(parse_docstring=True)
     async def run_eval(
         prompt_id: str,
-        models: Optional[list[str]] = None,
-        test_case_ids: Optional[list[str]] = None,
+        models: list[str] | None = None,
+        test_case_ids: list[str] | None = None,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     ) -> str:
         """Run evaluation for a prompt against all (or selected) test cases.
 
-        Runs each test case × model combination with bounded concurrency.
+        Runs each test case x model combination with bounded concurrency.
         Measures latency, validates JSON schema, computes fuzzy match, and
         calls LLM-as-judge as configured per test case.
 
@@ -270,7 +267,7 @@ def make_runner_tools(project_dir: Path):
             status = "cancelled"
             failure = "cancelled by user"
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             status = "failed"
             failure = str(exc)
             raise

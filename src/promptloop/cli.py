@@ -1,22 +1,22 @@
+import argparse
 import asyncio
 import difflib
-import sqlite3
-import sys
-import argparse
-import uuid
 import os
 import select
+import sqlite3
+import sys
 import termios
 import time
 import tty
+import uuid
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
-from prompt_toolkit import HTML
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from prompt_toolkit import HTML
 from rich.console import Console
 
 from .agent import create_eval_agent
@@ -87,7 +87,7 @@ def _list_thread_ids(project_dir: Path) -> list[str]:
         return []
 
 
-def _resolve_thread_id(project_dir: Path, requested_id: str) -> tuple[Optional[str], Optional[str]]:
+def _resolve_thread_id(project_dir: Path, requested_id: str) -> tuple[str | None, str | None]:
     thread_ids = _list_thread_ids(project_dir)
     if requested_id in thread_ids:
         return requested_id, None
@@ -175,7 +175,7 @@ def _format_tool_result(event: dict) -> str:
     if not output:
         return ""
     out_str = str(output)
-    lines = [l for l in out_str.splitlines() if l.strip()]
+    lines = [line for line in out_str.splitlines() if line.strip()]
     if any(x in name for x in ("read_file", "read")):
         return f"{len(lines)} lines" if lines else ""
     if any(x in name for x in ("glob", "grep", "search", "ls")):
@@ -264,7 +264,7 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
     # ── In-place status ticker ────────────────────────────────────────────────
     # Shows "verb… Ns" in place, updating every 300 ms.
     # Call _status_start(verb) to begin, await _status_stop() before any output.
-    _st_task: Optional[asyncio.Task[None]] = None
+    _st_task: asyncio.Task[None] | None = None
     _st_active = False
     _st_verb = ""
     _st_start = 0.0
@@ -318,10 +318,10 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
     interrupted = False
     stream_error: Exception | None = None
     stop_escape_listener = asyncio.Event()
-    escape_task: Optional[asyncio.Task[bool]] = None
+    escape_task: asyncio.Task[bool] | None = None
     active_tool_run_ids: set[str] = set()
     streaming_text = False
-    pending_tool_name: Optional[str] = None
+    pending_tool_name: str | None = None
 
     async def _wait_for_escape(stop_event: asyncio.Event) -> bool:
         if not sys.stdin.isatty():
@@ -461,9 +461,8 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
                 sys.stdout.flush()
                 _status_start("Thinking")  # restart for next model step
 
-            elif kind == "on_chat_model_end":
-                if not _is_inside_tool(event) and streaming_text:
-                    streaming_text = False
+            elif kind == "on_chat_model_end" and not _is_inside_tool(event) and streaming_text:
+                streaming_text = False
 
     try:
         stream_task = asyncio.create_task(_consume_stream())

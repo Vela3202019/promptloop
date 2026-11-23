@@ -9,7 +9,6 @@ from langchain_core.tools import tool
 from ..metrics import result_passed
 from ..paths import resolve_in_evals, validate_id
 
-
 REPORT_SYSTEM_PROMPT = (
     "You are an expert prompt engineer. Generate clear, actionable eval reports in markdown. "
     "Focus on root causes of failures and give specific, concrete improvement suggestions "
@@ -18,9 +17,6 @@ REPORT_SYSTEM_PROMPT = (
 
 
 def make_report_tools(project_dir: Path):
-    results_dir = resolve_in_evals(project_dir, "results")
-    prompts_dir = resolve_in_evals(project_dir, "prompts")
-
     @tool(parse_docstring=True)
     async def generate_report(
         prompt_id: str,
@@ -190,7 +186,7 @@ If an LLM judge gave a low score, explain what aspect of quality was lacking.
             "-" * 71,
             f"{'Pass rate':<20} {_rate_text(sa):>18} {_rate_text(sb):>18} {rate_delta:>+12.0%}",
             f"{'Avg latency (ms)':<20} {sa['avg_lat']:>18.0f} {sb['avg_lat']:>18.0f} {sb['avg_lat'] - sa['avg_lat']:>+12.0f}",
-            f"{'Prompt version':<20} {str(sa['version']):>18} {str(sb['version']):>18} {'':>12}",
+            f"{'Prompt version':<20} {sa['version']!s:>18} {sb['version']!s:>18} {'':>12}",
             "",
             "Per-test changes:",
         ]

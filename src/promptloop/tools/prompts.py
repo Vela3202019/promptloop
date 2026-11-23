@@ -3,7 +3,6 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from langchain_core.tools import tool
 
@@ -31,7 +30,7 @@ class ApprovalGate:
 def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
     prompts_dir = resolve_in_evals(project_dir, "prompts")
 
-    def _version_number(path: Path) -> Optional[int]:
+    def _version_number(path: Path) -> int | None:
         try:
             return int(path.stem[1:])
         except ValueError:
@@ -50,7 +49,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
     def _save_prompt(
         content: str,
         prompt_id: str,
-        source_path: Optional[str],
+        source_path: str | None,
         source_type: str,
     ) -> tuple[int, Path]:
         prompt_dir = _prompt_dir(prompt_id)
@@ -78,7 +77,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
     def _prompt_dir(prompt_id: str) -> Path:
         return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"))
 
-    def _source_path_if_file(source: str) -> Optional[Path]:
+    def _source_path_if_file(source: str) -> Path | None:
         if "\n" in source or len(source) > 240:
             return None
 
@@ -103,7 +102,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         ))
         return "".join(diff_lines)
 
-    def _build_prompt_from_edits(current: str, edits: list[dict]) -> tuple[str, Optional[str]]:
+    def _build_prompt_from_edits(current: str, edits: list[dict]) -> tuple[str, str | None]:
         if not edits:
             return current, "Error: no edits provided."
 
@@ -166,7 +165,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
 
     @tool(parse_docstring=True)
-    def register_prompt(source: str, prompt_id: Optional[str] = None) -> str:
+    def register_prompt(source: str, prompt_id: str | None = None) -> str:
         """Register a prompt file or inline prompt text into the eval system.
 
         If source is an existing path, reads the file and records the path for
