@@ -245,9 +245,10 @@ def _terminal_safe(text: str) -> str:
     return "".join(rendered)
 
 
-def _print_diff_lines(diff_lines: list[str]) -> None:
-    truncated = len(diff_lines) > MAX_DIFF_LINES
-    for line in diff_lines[:MAX_DIFF_LINES]:
+def _print_diff_lines(diff_lines: list[str]) -> str | None:
+    if len(diff_lines) > MAX_DIFF_LINES:
+        return "change too large to review; split it into smaller changes"
+    for line in diff_lines:
         line = _terminal_safe(line.rstrip("\n"))
         rendered = escape(line)
         if line.startswith(("+++", "---")):
@@ -260,8 +261,7 @@ def _print_diff_lines(diff_lines: list[str]) -> None:
             console.print(f"[cyan]{rendered}[/cyan]")
         else:
             console.print(f"[dim]{rendered}[/dim]")
-    if truncated:
-        console.print(f"[dim]… diff truncated after {MAX_DIFF_LINES} lines[/dim]")
+    return None
 
 
 def _virtual_project_path(project_dir: Path, file_path: str) -> Path:
