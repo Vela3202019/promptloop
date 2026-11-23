@@ -110,6 +110,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         prompt_id: str,
         source_path: str | None,
         source_type: str,
+        resolved_source_path: str | None = None,
     ) -> tuple[int, Path]:
         prompt_dir = _prompt_dir(prompt_id)
         prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +123,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
 
         meta = {
             "source_path": source_path,
+            "resolved_source_path": resolved_source_path,
             "source_type": source_type,
             "prompt_id": prompt_id,
             "registered_at": datetime.now().isoformat(),
@@ -161,7 +163,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             candidate = f"{prompt_id}_{suffix}"
             suffix += 1
 
-    def _source_path_if_file(source: str) -> Path | None:
+    def _source_path_if_file(source: str) -> tuple[Path, Path] | None:
         if "\n" in source or len(source) > 240:
             return None
 
@@ -176,7 +178,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         physical_exists = _is_file(physical_path)
         if physical_exists:
             try:
-                return resolve_in_project(project_dir, physical_path)
+                return physical_path.absolute(), resolve_in_project(project_dir, physical_path)
             except ValueError:
                 if not raw_path.is_absolute():
                     raise
@@ -184,10 +186,10 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if raw_path.is_absolute():
             virtual_path = project_dir / str(raw_path).lstrip("/")
             if _is_file(virtual_path):
-                return resolve_in_project(project_dir, virtual_path)
+                return virtual_path.absolute(), resolve_in_project(project_dir, virtual_path)
 
         if physical_exists:
-            return resolve_in_project(project_dir, physical_path)
+            return physical_path.absolute(), resolve_in_project(project_dir, physical_path)
         return None
 
     def _diff(current: str, proposed: str, prompt_id: str) -> str:
@@ -248,6 +250,9 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
                 return f"Error: {e}; changes were not applied."
             if not source_path.exists():
                 return f"Error: source file {source_path} not found; changes were not applied."
+            expected_target = meta.get("resolved_source_path")
+            if expected_target is not None and str(source_path) != expected_target:
+                return "Error: prompt changed, re-propose the edit; changes were not applied."
             source_path.write_text(new_content)
             source_note = f"Source file updated at {source_path}."
 
@@ -285,7 +290,10 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         except ValueError as e:
             return f"Error: {e}"
 
+        resolved_source_path = None
         if p is not None:
+            p, resolved_path = p
+            resolved_source_path = str(resolved_path)
             content = p.read_text()
             pid = prompt_id or p.stem.replace(" ", "_").lower()
             source_path = str(p)
@@ -304,7 +312,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             pid = _dedupe_file_prompt_id(pid, source_path)
 
         try:
-            version, _ = _save_prompt(content, pid, source_path, source_type)
+            version, _ = _save_prompt(content, pid, source_path, source_type, resolved_source_path)
         except ValueError as e:
             return f"Error: {e}"
         preview = content[:300] + "\n..." if len(content) > 300 else content
@@ -389,7 +397,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
 
             latest_content = current_file.read_text()
             latest_meta = json.loads(meta_file.read_text())
-            identity_fields = ("prompt_id", "source_path", "source_type", "registered_at")
+            identity_fields = ("prompt_id", "source_path", "source_type", "registered_at", "resolved_source_path")
             if any(latest_meta.get(field) != base_meta.get(field) for field in identity_fields):
                 return "Error: prompt changed, re-propose the edit."
             latest_version = latest_meta.get("version")
