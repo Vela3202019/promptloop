@@ -62,6 +62,59 @@ def test_prompt_register_edit_history_and_approval_gate(tmp_path):
     assert "← current" in history
 
 
+async def _wait_for_pending_approval(gate, prompt_id):
+    for _ in range(100):
+        if gate._waiters.get(prompt_id):
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("edit did not reach approval gate")
+
+
+def _intervening_prompt_change(tmp_path, prompt_id, content):
+    prompt_dir = tmp_path / ".evals" / "prompts" / prompt_id
+    (prompt_dir / "current.txt").write_text(content)
+    meta_file = prompt_dir / "meta.json"
+    meta = json.loads(meta_file.read_text())
+    meta["version"] += 1
+    meta_file.write_text(json.dumps(meta))
+
+
+def test_approved_edit_reapplies_after_intervening_change(tmp_path):
+    gate, tools = _tools(tmp_path)
+    tools["register_prompt"].invoke({"source": "alpha beta", "prompt_id": "p"})
+    edit = {"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]}
+
+    async def scenario():
+        task = asyncio.create_task(tools["edit_prompt"].ainvoke(edit))
+        await _wait_for_pending_approval(gate, "p")
+        _intervening_prompt_change(tmp_path, "p", "alpha beta gamma")
+        gate.resolve("p", True)
+        return await task
+
+    result = asyncio.run(scenario())
+
+    assert "Prompt 'p' is now v3" in result
+    assert (tmp_path / ".evals" / "prompts" / "p" / "current.txt").read_text() == "omega beta gamma"
+
+
+def test_approved_edit_rejects_unmatched_intervening_change(tmp_path):
+    gate, tools = _tools(tmp_path)
+    tools["register_prompt"].invoke({"source": "alpha beta", "prompt_id": "p"})
+    edit = {"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]}
+
+    async def scenario():
+        task = asyncio.create_task(tools["edit_prompt"].ainvoke(edit))
+        await _wait_for_pending_approval(gate, "p")
+        _intervening_prompt_change(tmp_path, "p", "replaced beta")
+        gate.resolve("p", True)
+        return await task
+
+    result = asyncio.run(scenario())
+
+    assert "prompt changed, re-propose" in result
+    assert (tmp_path / ".evals" / "prompts" / "p" / "current.txt").read_text() == "replaced beta"
+
+
 def test_inline_prompt_ids_are_unique(tmp_path):
     _, tools = _tools(tmp_path)
     first = tools["register_prompt"].invoke({"source": "first inline prompt"})

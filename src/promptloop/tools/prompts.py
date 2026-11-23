@@ -359,12 +359,22 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
-        current = (prompt_dir / "current.txt").read_text()
+        current_file = prompt_dir / "current.txt"
+        meta_file = prompt_dir / "meta.json"
+        current = current_file.read_text()
+        base_version = json.loads(meta_file.read_text()).get("version")
         new_content, error = _build_prompt_from_edits(current, edits)
         if error:
             return error
         if not await gate.consume(prompt_id):
             return f"Edit to '{prompt_id}' cancelled by user."
+
+        latest_content = current_file.read_text()
+        latest_version = json.loads(meta_file.read_text()).get("version")
+        if latest_content != current or latest_version != base_version:
+            new_content, error = _build_prompt_from_edits(latest_content, edits)
+            if error:
+                return "Error: prompt changed, re-propose the edit."
         return _apply_content(prompt_id, new_content)
 
     @tool(parse_docstring=True)
