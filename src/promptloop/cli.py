@@ -25,6 +25,7 @@ from rich.markup import escape
 from .agent import create_eval_agent
 from .paths import resolve_in_evals, validate_id
 from .tools import ApprovalGate
+from .tools.prompts import prompt_approval_key
 
 if TYPE_CHECKING:
     from prompt_toolkit import PromptSession
@@ -735,13 +736,19 @@ async def _stream_single_input(
 
                 if name == "edit_prompt":
                     prompt_id = args.get("prompt_id", "")
-                    gate.expect(prompt_id)
+                    edits = args.get("edits", [])
+                    try:
+                        current_file = resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"), "current.txt")
+                        approval_key = prompt_approval_key(prompt_id, current_file.read_text(), edits)
+                    except Exception:  # noqa: BLE001
+                        approval_key = prompt_id
+                    gate.expect(approval_key)
                     prefix = "" if pending_tool_name else "\n"
                     pending_tool_name = None
                     sys.stdout.write(f"{prefix}  → {name}")
                     sys.stdout.flush()
 
-                    diff_error = _render_prompt_diff(project_dir, prompt_id, args.get("edits", []))
+                    diff_error = _render_prompt_diff(project_dir, prompt_id, edits)
 
                     # Pause escape listener so it doesn't race for stdin
                     stop_escape_listener.set()
@@ -757,7 +764,7 @@ async def _stream_single_input(
                         sys.stdout.write("  [y/N] Apply  ")
                         sys.stdout.flush()
                         approved = await _read_approval_key(auto_approve)
-                    gate.resolve(prompt_id, approved)
+                    gate.resolve(approval_key, approved)
 
                     if approved:
                         console.print("[green]applying[/green]")

@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import hashlib
 import json
 import uuid
 from datetime import datetime
@@ -8,6 +9,11 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..paths import resolve_in_evals, resolve_in_project, validate_id
+
+
+def prompt_approval_key(prompt_id: str, current: str, edits: list[dict]) -> str:
+    payload = json.dumps({"prompt_id": prompt_id, "current": current, "edits": edits}, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 class _ApprovalWaiter:
@@ -47,6 +53,9 @@ class ApprovalGate:
                 waiter.future.set_result(approved)
         else:
             self._decisions[key] = approved
+
+    def drop(self, key: str) -> None:
+        self._decisions.pop(key, None)
 
     async def consume(self, key: str) -> bool:
         if key in self._decisions:
@@ -370,23 +379,27 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         current = current_file.read_text()
         base_meta = json.loads(meta_file.read_text())
         base_version = base_meta.get("version")
-        new_content, error = _build_prompt_from_edits(current, edits)
-        if error:
-            return error
-        if not await gate.consume(prompt_id):
-            return f"Edit to '{prompt_id}' cancelled by user."
-
-        latest_content = current_file.read_text()
-        latest_meta = json.loads(meta_file.read_text())
-        identity_fields = ("prompt_id", "source_path", "source_type", "registered_at")
-        if any(latest_meta.get(field) != base_meta.get(field) for field in identity_fields):
-            return "Error: prompt changed, re-propose the edit."
-        latest_version = latest_meta.get("version")
-        if latest_content != current or latest_version != base_version:
-            new_content, error = _build_prompt_from_edits(latest_content, edits)
+        approval_key = prompt_approval_key(prompt_id, current, edits)
+        try:
+            new_content, error = _build_prompt_from_edits(current, edits)
             if error:
+                return error
+            if not await gate.consume(approval_key):
+                return f"Edit to '{prompt_id}' cancelled by user."
+
+            latest_content = current_file.read_text()
+            latest_meta = json.loads(meta_file.read_text())
+            identity_fields = ("prompt_id", "source_path", "source_type", "registered_at")
+            if any(latest_meta.get(field) != base_meta.get(field) for field in identity_fields):
                 return "Error: prompt changed, re-propose the edit."
-        return _apply_content(prompt_id, new_content)
+            latest_version = latest_meta.get("version")
+            if latest_content != current or latest_version != base_version:
+                new_content, error = _build_prompt_from_edits(latest_content, edits)
+                if error:
+                    return "Error: prompt changed, re-propose the edit."
+            return _apply_content(prompt_id, new_content)
+        finally:
+            gate.drop(approval_key)
 
     @tool(parse_docstring=True)
     def show_prompt_history(prompt_id: str) -> str:
