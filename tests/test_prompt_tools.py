@@ -1,9 +1,38 @@
+import asyncio
+
 from promptloop.tools.prompts import ApprovalGate, make_prompt_tools
 
 
 def _tools(project_dir):
-    gate = ApprovalGate()
+    gate = ApprovalGate(listener_timeout=0.01)
     return gate, {tool.name: tool for tool in make_prompt_tools(project_dir, gate)}
+
+
+def _ainvoke(tool, args):
+    return asyncio.run(tool.ainvoke(args))
+
+
+def test_approval_gate_consume_waits_for_resolve():
+    async def scenario():
+        gate = ApprovalGate(listener_timeout=0.01)
+        task = asyncio.create_task(gate.consume("p"))
+        await asyncio.sleep(0)
+        assert not task.done()
+        gate.expect("p")
+        await asyncio.sleep(0)
+        assert not task.done()
+        gate.resolve("p", True)
+        assert await task is True
+
+    asyncio.run(scenario())
+
+
+def test_approval_gate_denies_without_listener():
+    async def scenario():
+        gate = ApprovalGate(listener_timeout=0.01)
+        return await gate.consume("p")
+
+    assert asyncio.run(scenario()) is False
 
 
 def test_prompt_register_edit_history_and_approval_gate(tmp_path):
@@ -13,15 +42,15 @@ def test_prompt_register_edit_history_and_approval_gate(tmp_path):
     assert current.read_text() == "alpha beta"
 
     edit = {"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]}
-    assert tools["edit_prompt"].invoke(edit) == "Edit to 'p' cancelled by user."
+    assert _ainvoke(tools["edit_prompt"], edit) == "Edit to 'p' cancelled by user."
     assert current.read_text() == "alpha beta"
 
     gate.resolve("p", False)
-    assert tools["edit_prompt"].invoke(edit) == "Edit to 'p' cancelled by user."
+    assert _ainvoke(tools["edit_prompt"], edit) == "Edit to 'p' cancelled by user."
     assert current.read_text() == "alpha beta"
 
     gate.resolve("p", True)
-    assert "Prompt 'p' is now v2" in tools["edit_prompt"].invoke(edit)
+    assert "Prompt 'p' is now v2" in _ainvoke(tools["edit_prompt"], edit)
     assert current.read_text() == "omega beta"
 
     history_file = tmp_path / ".evals" / "prompts" / "p" / "history" / "vnot-a-number.txt"
@@ -67,6 +96,6 @@ def test_approved_edit_updates_source_file_inside_project(tmp_path):
     gate, tools = _tools(tmp_path)
     assert "Registered prompt 'p'" in tools["register_prompt"].invoke({"source": "prompt.txt", "prompt_id": "p"})
     gate.resolve("p", True)
-    result = tools["edit_prompt"].invoke({"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]})
+    result = _ainvoke(tools["edit_prompt"], {"prompt_id": "p", "edits": [{"old": "alpha", "new": "omega"}]})
     assert "Source file updated" in result
     assert source.read_text() == "omega beta"

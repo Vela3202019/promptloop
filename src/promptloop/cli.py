@@ -409,6 +409,7 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
 
                 if name == "edit_prompt":
                     prompt_id = args.get("prompt_id", "")
+                    gate.expect(prompt_id)
                     prefix = "" if pending_tool_name else "\n"
                     pending_tool_name = None
                     sys.stdout.write(f"{prefix}  → {name}")

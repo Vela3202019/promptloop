@@ -1,3 +1,4 @@
+import asyncio
 import difflib
 import json
 import uuid
@@ -9,22 +10,71 @@ from langchain_core.tools import tool
 from ..paths import resolve_in_evals, resolve_in_project, validate_id
 
 
-class ApprovalGate:
-    """Shared approval state between the CLI and tools.
+class _ApprovalWaiter:
+    def __init__(self, future: asyncio.Future[bool]) -> None:
+        self.future = future
+        self.listener_seen = False
 
-    The CLI sets a decision at on_tool_start (after showing the diff and
-    reading a keypress). The tool reads it synchronously when it runs,
-    which always happens after on_tool_start completes.
+
+class ApprovalGate:
+    """Awaitable approval state shared between the CLI and tools.
+
+    The CLI calls expect() as soon as it observes edit_prompt's on_tool_start
+    event, then resolve() after reading the keypress. The tool waits for that
+    decision because event consumption and tool execution are concurrent.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, listener_timeout: float = 1.0, decision_timeout: float = 300.0) -> None:
         self._decisions: dict[str, bool] = {}
+        self._expected: set[str] = set()
+        self._waiters: dict[str, list[_ApprovalWaiter]] = {}
+        self._listener_timeout = listener_timeout
+        self._decision_timeout = decision_timeout
+
+    def expect(self, key: str) -> None:
+        self._expected.add(key)
+        for waiter in self._waiters.get(key, []):
+            waiter.listener_seen = True
 
     def resolve(self, key: str, approved: bool) -> None:
-        self._decisions[key] = approved
+        self._expected.discard(key)
+        waiters = self._waiters.get(key)
+        if waiters:
+            waiter = waiters.pop(0)
+            if not waiters:
+                self._waiters.pop(key, None)
+            if not waiter.future.done():
+                waiter.future.set_result(approved)
+        else:
+            self._decisions[key] = approved
 
-    def consume(self, key: str) -> bool:
-        return self._decisions.pop(key, False)
+    async def consume(self, key: str) -> bool:
+        if key in self._decisions:
+            return self._decisions.pop(key)
+
+        loop = asyncio.get_running_loop()
+        waiter = _ApprovalWaiter(loop.create_future())
+        waiter.listener_seen = key in self._expected
+        self._waiters.setdefault(key, []).append(waiter)
+        try:
+            try:
+                return await asyncio.wait_for(asyncio.shield(waiter.future), timeout=self._listener_timeout)
+            except TimeoutError:
+                if not waiter.listener_seen:
+                    return False
+                try:
+                    return await asyncio.wait_for(waiter.future, timeout=self._decision_timeout)
+                except TimeoutError:
+                    return False
+        finally:
+            waiters = self._waiters.get(key)
+            if waiters is not None:
+                if waiter in waiters:
+                    waiters.remove(waiter)
+                if not waiters:
+                    self._waiters.pop(key, None)
+            if not waiter.future.done():
+                waiter.future.cancel()
 
 
 def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
@@ -251,7 +301,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         return "\n".join(lines)
 
     @tool(parse_docstring=True)
-    def edit_prompt(prompt_id: str, edits: list[dict]) -> str:
+    async def edit_prompt(prompt_id: str, edits: list[dict]) -> str:
         """Edit a prompt with targeted find/replace changes.
 
         The TUI will show a diff and ask for approval before writing. If the
@@ -275,7 +325,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         new_content, error = _build_prompt_from_edits(current, edits)
         if error:
             return error
-        if not gate.consume(prompt_id):
+        if not await gate.consume(prompt_id):
             return f"Edit to '{prompt_id}' cancelled by user."
         return _apply_content(prompt_id, new_content)
 
