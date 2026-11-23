@@ -25,11 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Required registered source files to resolve inside the project after following symlinks.
 - Confined deepagents filesystem access to the project directory.
 - Made prompt-edit approval fail closed, including non-interactive use unless `--yes` is supplied.
+- Required approval before built-in `write_file`/`edit_file` filesystem mutations, with previews and clean rejection of interrupted pending writes.
 - Stopped loading a global `~/.env`; only project `.env` and `.env.local` are used.
 
 ### Added
 
-- Added an offline pytest suite covering path safety, prompt editing, approvals, metrics, comparisons, schema inference, and thread resolution.
+- Added an offline pytest suite covering path safety, prompt editing, approvals, filesystem-write interrupts, metrics, comparisons, schema inference, and thread resolution.
 - Added Ruff linting and basedpyright type-checking configuration.
 
 ## [0.1.0] - 2026-11-23

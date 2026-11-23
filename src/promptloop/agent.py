@@ -4,6 +4,7 @@ from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain.chat_models import init_chat_model
+from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.memory import MemorySaver
 
 from .system_prompt import SYSTEM_PROMPT
@@ -21,16 +22,19 @@ def create_eval_agent(
     model_name: str = "anthropic:claude-sonnet-4-6",
     checkpointer: Any | None = None,
     gate: ApprovalGate | None = None,
+    chat_model: BaseChatModel | None = None,
 ):
     """Create the prompt eval agent scoped to a project directory.
 
     Initialises the .evals/ directory structure and registers all custom tools.
-    The agent has full filesystem read access to the project dir via deepagents
-    built-in tools (read_file, glob, grep, ls, etc.).
+    The agent has filesystem read access to the project dir via deepagents
+    built-in tools (read_file, glob, grep, ls, etc.). Built-in write tools
+    interrupt for human approval before modifying files.
 
     Args:
         project_dir: Root directory of the project being evaluated.
         model_name: The orchestrating agent's model (not the model under test).
+        chat_model: Optional pre-initialized model, primarily for offline tests.
 
     Returns:
         A compiled LangGraph agent ready to invoke.
@@ -46,7 +50,15 @@ def create_eval_agent(
         *make_report_tools(project_dir),
     ]
 
-    model = init_chat_model(model_name, temperature=0, streaming=True)
+    model = (
+        chat_model
+        if chat_model is not None
+        else init_chat_model(
+            model_name,
+            temperature=0,
+            streaming=True,
+        )
+    )
 
     backend = FilesystemBackend(
         root_dir=str(project_dir),
@@ -59,4 +71,8 @@ def create_eval_agent(
         system_prompt=SYSTEM_PROMPT.format(project_dir=project_dir),
         checkpointer=checkpointer if checkpointer is not None else MemorySaver(),
         backend=backend,
+        interrupt_on={
+            "write_file": {"allowed_decisions": ["approve", "reject"]},
+            "edit_file": {"allowed_decisions": ["approve", "reject"]},
+        },
     )

@@ -9,7 +9,9 @@ Current mitigations include:
 - deepagents filesystem access runs in virtual mode and is confined to the selected project directory.
 - Registered prompt source files must resolve, after following symlinks, inside the project directory.
 - Eval state identifiers are validated and resolved paths must remain inside `.evals/`.
+- Built-in `write_file` and `edit_file` calls do not execute until the user approves them at `[y/N]`; read-only filesystem tools are ungated.
 - The custom `edit_prompt` flow is fail-closed: missing approval, non-interactive input, Enter, or a diff-rendering failure denies the edit.
+- A thread resumed with a pending file-write interrupt rejects that pending write instead of leaving the thread stuck.
 - `--yes` intentionally bypasses interactive approval, including in non-interactive sessions. Use it only when the prompt content and agent instructions are trusted.
 - Project `.env` is loaded before `.env.local`, which overrides it. A global `~/.env` is not loaded.
 
