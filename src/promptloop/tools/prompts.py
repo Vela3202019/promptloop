@@ -256,7 +256,6 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             source_path.write_text(new_content)
             source_note = f"Source file updated at {source_path}."
 
-        history_dir = prompt_dir / "history"
         _prompt_artifact(prompt_id, "history", f"v{new_version}.txt").write_text(new_content)
         _prompt_artifact(prompt_id, "current.txt").write_text(new_content)
 

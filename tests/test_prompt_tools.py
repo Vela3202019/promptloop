@@ -26,7 +26,7 @@ def test_approval_gate_consume_waits_for_resolve():
         gate.expect("p")
         await asyncio.sleep(0)
         assert not task.done()
-        gate.resolve(_approval_key(edit["edits"]), True)
+        gate.resolve("p", True)
         assert await task is True
 
     asyncio.run(scenario())
