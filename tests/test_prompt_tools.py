@@ -145,6 +145,25 @@ def test_duplicate_source_file_stems_get_distinct_ids(tmp_path):
     assert (prompts_dir / "shared_2" / "current.txt").read_text() == "second prompt"
 
 
+def test_explicit_duplicate_id_updates_source_path(tmp_path):
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    (first_dir / "shared.txt").write_text("first prompt")
+    (second_dir / "shared.txt").write_text("second prompt")
+
+    _, tools = _tools(tmp_path)
+    first = tools["register_prompt"].invoke({"source": "first/shared.txt"})
+    moved = tools["register_prompt"].invoke({"source": "second/shared.txt", "prompt_id": "shared"})
+
+    assert "Registered prompt 'shared' (v1)" in first
+    assert "Registered prompt 'shared' (v2)" in moved
+    meta = json.loads((tmp_path / ".evals" / "prompts" / "shared" / "meta.json").read_text())
+    assert meta["source_path"] == str((second_dir / "shared.txt").resolve())
+    assert not (tmp_path / ".evals" / "prompts" / "shared_2").exists()
+
+
 def test_register_prompt_accepts_virtual_project_path(tmp_path):
     prompt_file = tmp_path / "src" / "prompts" / "virtual.txt"
     prompt_file.parent.mkdir(parents=True)

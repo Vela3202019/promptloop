@@ -285,7 +285,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             source_type = "inline"
             source_label = "Source: inline prompt"
 
-        if source_type == "file" and source_path is not None:
+        if source_type == "file" and source_path is not None and prompt_id is None:
             pid = _dedupe_file_prompt_id(pid, source_path)
 
         try:
