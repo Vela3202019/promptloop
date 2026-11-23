@@ -13,15 +13,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 from ..metrics import evaluate_sync_metric, result_passed
+from ..paths import resolve_in_evals, validate_id
 
 DEFAULT_MAX_CONCURRENCY = 4
 
 
 def make_runner_tools(project_dir: Path):
-    prompts_dir = project_dir / ".evals" / "prompts"
-    test_cases_dir = project_dir / ".evals" / "test_cases"
-    eval_configs_dir = project_dir / ".evals" / "eval_configs"
-    results_dir = project_dir / ".evals" / "results"
+    prompts_dir = resolve_in_evals(project_dir, "prompts")
+    test_cases_dir = resolve_in_evals(project_dir, "test_cases")
+    eval_configs_dir = resolve_in_evals(project_dir, "eval_configs")
+    results_dir = resolve_in_evals(project_dir, "results")
 
     def _get_model(model_cache: dict[str, Any], model_name: str) -> Any:
         if model_name not in model_cache:
@@ -170,12 +171,15 @@ def make_runner_tools(project_dir: Path):
         Returns:
             Run ID and a pass/fail summary. Use generate_report() for the full analysis.
         """
-        prompt_dir = prompts_dir / prompt_id
+        try:
+            prompt_id = validate_id(prompt_id, "prompt_id")
+            prompt_dir = resolve_in_evals(project_dir, "prompts", prompt_id)
+            tc_dir = resolve_in_evals(project_dir, "test_cases", prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not registered."
         prompt_content = (prompt_dir / "current.txt").read_text()
-
-        tc_dir = test_cases_dir / prompt_id
         all_cases = list(tc_dir.glob("*.json")) if tc_dir.exists() else []
         if not all_cases:
             return f"Error: no test cases found for '{prompt_id}'. Add some with add_test_case."
@@ -192,7 +196,7 @@ def make_runner_tools(project_dir: Path):
         # Resolve models and default metrics.
         default_metrics = [{"type": "latency"}]
         if models is None:
-            config_file = eval_configs_dir / f"{prompt_id}.json"
+            config_file = resolve_in_evals(project_dir, "eval_configs", f"{prompt_id}.json")
             if config_file.exists():
                 config_data = json.loads(config_file.read_text())
                 resolved_models: list[str] = config_data.get("default_models", ["anthropic:claude-sonnet-4-6"])
@@ -201,7 +205,7 @@ def make_runner_tools(project_dir: Path):
                 resolved_models = ["anthropic:claude-sonnet-4-6"]
         else:
             resolved_models = models
-            config_file = eval_configs_dir / f"{prompt_id}.json"
+            config_file = resolve_in_evals(project_dir, "eval_configs", f"{prompt_id}.json")
             if config_file.exists():
                 config_data = json.loads(config_file.read_text())
                 default_metrics = config_data.get("default_metrics") or default_metrics
@@ -211,7 +215,7 @@ def make_runner_tools(project_dir: Path):
                 tc["metrics"] = default_metrics
 
         run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
-        run_dir = results_dir / prompt_id / run_id
+        run_dir = resolve_in_evals(project_dir, "results", prompt_id, validate_id(run_id, "run_id"))
         run_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_version = json.loads((prompt_dir / "meta.json").read_text()).get("version")
@@ -318,7 +322,10 @@ def make_runner_tools(project_dir: Path):
         Returns:
             A list of run IDs with pass/fail counts and model info.
         """
-        runs_dir = results_dir / prompt_id
+        try:
+            runs_dir = resolve_in_evals(project_dir, "results", validate_id(prompt_id, "prompt_id"))
+        except ValueError as e:
+            return f"Error: {e}"
         if not runs_dir.exists():
             return f"No eval runs found for '{prompt_id}'."
 

@@ -4,10 +4,26 @@ from pathlib import Path
 from datetime import datetime
 from langchain_core.tools import tool
 
+from ..paths import resolve_in_evals, validate_id
+
 
 def make_test_case_tools(project_dir: Path):
-    test_cases_dir = project_dir / ".evals" / "test_cases"
-    eval_configs_dir = project_dir / ".evals" / "eval_configs"
+    test_cases_dir = resolve_in_evals(project_dir, "test_cases")
+    eval_configs_dir = resolve_in_evals(project_dir, "eval_configs")
+
+    def _test_case_dir(prompt_id: str) -> Path:
+        return resolve_in_evals(project_dir, "test_cases", validate_id(prompt_id, "prompt_id"))
+
+    def _test_case_file(prompt_id: str, test_id: str) -> Path:
+        return resolve_in_evals(
+            project_dir,
+            "test_cases",
+            validate_id(prompt_id, "prompt_id"),
+            f"{validate_id(test_id, 'test_id')}.json",
+        )
+
+    def _eval_config_file(prompt_id: str) -> Path:
+        return resolve_in_evals(project_dir, "eval_configs", f"{validate_id(prompt_id, 'prompt_id')}.json")
 
     def _validate_metrics(metrics: list[dict] | None, expected_output: str | None) -> str | None:
         if metrics is None:
@@ -62,14 +78,18 @@ def make_test_case_tools(project_dir: Path):
         Returns:
             Confirmation with the new test case ID.
         """
+        try:
+            tc_dir = _test_case_dir(prompt_id)
+            tid = validate_id(test_id, "test_id") if test_id is not None else f"tc_{uuid.uuid4().hex[:8]}"
+            tc_file = _test_case_file(prompt_id, tid)
+        except ValueError as e:
+            return f"Error: {e}"
+
         validation_error = _validate_metrics(metrics, expected_output)
         if validation_error is not None:
             return validation_error
 
-        tc_dir = test_cases_dir / prompt_id
         tc_dir.mkdir(parents=True, exist_ok=True)
-
-        tid = test_id or f"tc_{uuid.uuid4().hex[:8]}"
         tc = {
             "id": tid,
             "prompt_id": prompt_id,
@@ -79,7 +99,7 @@ def make_test_case_tools(project_dir: Path):
             "notes": notes,
             "created_at": datetime.now().isoformat(),
         }
-        (tc_dir / f"{tid}.json").write_text(json.dumps(tc, indent=2))
+        tc_file.write_text(json.dumps(tc, indent=2))
         metrics_str = ", ".join(m["type"] for m in tc["metrics"])
         return f"Added test case '{tid}' for prompt '{prompt_id}' (metrics: {metrics_str})."
 
@@ -93,7 +113,10 @@ def make_test_case_tools(project_dir: Path):
         Returns:
             A formatted list of test cases with IDs, input previews, and metrics.
         """
-        tc_dir = test_cases_dir / prompt_id
+        try:
+            tc_dir = _test_case_dir(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         if not tc_dir.exists() or not list(tc_dir.glob("*.json")):
             return f"No test cases found for '{prompt_id}'."
 
@@ -125,7 +148,10 @@ def make_test_case_tools(project_dir: Path):
         Returns:
             Confirmation message.
         """
-        tc_file = test_cases_dir / prompt_id / f"{test_id}.json"
+        try:
+            tc_file = _test_case_file(prompt_id, test_id)
+        except ValueError as e:
+            return f"Error: {e}"
         if not tc_file.exists():
             return f"Test case '{test_id}' not found for prompt '{prompt_id}'."
         tc_file.unlink()
@@ -182,6 +208,10 @@ def make_test_case_tools(project_dir: Path):
         Returns:
             Confirmation message.
         """
+        try:
+            config_file = _eval_config_file(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         eval_configs_dir.mkdir(parents=True, exist_ok=True)
         config = {
             "prompt_id": prompt_id,
@@ -190,7 +220,7 @@ def make_test_case_tools(project_dir: Path):
             "notes": notes,
             "saved_at": datetime.now().isoformat(),
         }
-        (eval_configs_dir / f"{prompt_id}.json").write_text(json.dumps(config, indent=2))
+        config_file.write_text(json.dumps(config, indent=2))
         models_str = ", ".join(default_models)
         metrics_str = ", ".join(m["type"] for m in default_metrics)
         return f"Saved eval config for '{prompt_id}'.\n  models: {models_str}\n  metrics: {metrics_str}"
@@ -205,7 +235,10 @@ def make_test_case_tools(project_dir: Path):
         Returns:
             The eval config as formatted JSON, or a message if not yet configured.
         """
-        config_file = eval_configs_dir / f"{prompt_id}.json"
+        try:
+            config_file = _eval_config_file(prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         if not config_file.exists():
             return f"No eval config for '{prompt_id}' yet. Use save_eval_config to set one up."
         return config_file.read_text()

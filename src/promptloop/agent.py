@@ -50,7 +50,7 @@ def create_eval_agent(
 
     backend = FilesystemBackend(
         root_dir=str(project_dir),
-        virtual_mode=False,
+        virtual_mode=True,
     )
 
     return create_deep_agent(

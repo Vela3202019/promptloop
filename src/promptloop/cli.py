@@ -20,6 +20,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from rich.console import Console
 
 from .agent import create_eval_agent
+from .paths import resolve_in_evals, validate_id
 from .tools import ApprovalGate
 
 if TYPE_CHECKING:
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
 
 def _load_env(project_dir: Path) -> None:
     """Load env files from broad defaults to project-specific overrides."""
-    load_dotenv(Path.home() / ".env", override=False, verbose=False)
     load_dotenv(project_dir / ".env", override=False, verbose=False)
     load_dotenv(project_dir / ".env.local", override=True, verbose=False)
 
@@ -185,19 +185,19 @@ def _format_tool_result(event: dict) -> str:
     return ""
 
 
-def _render_prompt_diff(project_dir: Path, prompt_id: str, edits: list[dict]) -> None:
-    """Print a colored unified diff for apply_prompt_edits args, before the tool writes."""
+def _render_prompt_diff(project_dir: Path, prompt_id: str, edits: list[dict]) -> str | None:
+    """Print a colored unified diff before the tool writes. Returns an error string on failure."""
     try:
-        current_file = project_dir / ".evals" / "prompts" / prompt_id / "current.txt"
+        current_file = resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"), "current.txt")
         if not current_file.exists():
-            return
+            return "diff unavailable: current prompt file not found"
         current = current_file.read_text()
 
         proposed = current
-        for edit in edits:
+        for index, edit in enumerate(edits, start=1):
             old, new = edit.get("old", ""), edit.get("new", "")
-            if not isinstance(old, str) or not old or current.count(old) != 1:
-                return
+            if not isinstance(old, str) or not isinstance(new, str) or not old or current.count(old) != 1:
+                return f"diff unavailable: edit {index} is invalid or ambiguous"
             proposed = proposed.replace(old, new, 1)
 
         diff_lines = list(difflib.unified_diff(
@@ -208,12 +208,12 @@ def _render_prompt_diff(project_dir: Path, prompt_id: str, edits: list[dict]) ->
             n=3,
         ))
         if not diff_lines:
-            return
+            return "diff unavailable: no changes detected"
 
         console.print()
         for line in diff_lines:
             line = line.rstrip("\n")
-            if line.startswith("+++") or line.startswith("---"):
+            if line.startswith(("+++", "---")):
                 console.print(f"[dim]{line}[/dim]")
             elif line.startswith("+"):
                 console.print(f"[green]{line}[/green]")
@@ -224,14 +224,17 @@ def _render_prompt_diff(project_dir: Path, prompt_id: str, edits: list[dict]) ->
             else:
                 console.print(f"[dim]{line}[/dim]")
         console.print()
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        return f"diff unavailable: {e}"
+    return None
 
 
-async def _read_approval_key() -> bool:
-    """Read a single y/n keypress. Returns True for yes, False for no/esc."""
-    if not sys.stdin.isatty():
+async def _read_approval_key(auto_approve: bool) -> bool:
+    """Read a single y/n keypress. Defaults to deny unless auto-approval is enabled."""
+    if auto_approve:
         return True
+    if not sys.stdin.isatty():
+        return False
     fd = sys.stdin.fileno()
     original_mode = termios.tcgetattr(fd)
     try:
@@ -242,15 +245,15 @@ async def _read_approval_key() -> bool:
                 await asyncio.sleep(0)
                 continue
             key = os.read(fd, 1).decode("utf-8", errors="ignore").lower()
-            if key in ("y", "\r", "\n"):
+            if key == "y":
                 return True
-            if key in ("n", ESCAPE_KEY, "q"):
+            if key in ("n", ESCAPE_KEY, "q", "\r", "\n"):
                 return False
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
 
 
-async def _stream_response(agent, message: str, thread_id: str, project_dir: Path, gate: ApprovalGate) -> None:
+async def _stream_response(agent, message: str, thread_id: str, project_dir: Path, gate: ApprovalGate, auto_approve: bool = False) -> None:
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": RECURSION_LIMIT,
@@ -411,7 +414,7 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
                     sys.stdout.write(f"{prefix}  → {name}")
                     sys.stdout.flush()
 
-                    _render_prompt_diff(project_dir, prompt_id, args.get("edits", []))
+                    diff_error = _render_prompt_diff(project_dir, prompt_id, args.get("edits", []))
 
                     # Pause escape listener so it doesn't race for stdin
                     stop_escape_listener.set()
@@ -420,9 +423,13 @@ async def _stream_response(agent, message: str, thread_id: str, project_dir: Pat
                         with suppress(asyncio.CancelledError):
                             await escape_task
 
-                    sys.stdout.write("  [y] Apply  [n] Cancel  ")
-                    sys.stdout.flush()
-                    approved = await _read_approval_key()
+                    if diff_error:
+                        console.print(f"[red]{diff_error}; edit denied[/red]")
+                        approved = False
+                    else:
+                        sys.stdout.write("  [y/N] Apply  ")
+                        sys.stdout.flush()
+                        approved = await _read_approval_key(auto_approve)
                     gate.resolve(prompt_id, approved)
 
                     if approved:
@@ -514,6 +521,11 @@ async def amain() -> None:
         "--model",
         default="anthropic:claude-sonnet-4-6",
         help="Orchestrator model (default: anthropic:claude-sonnet-4-6)",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Automatically approve prompt edits, including non-interactive use (use with caution)",
     )
     parser.add_argument(
         "--thread",
@@ -609,7 +621,7 @@ async def amain() -> None:
                     console.print(f"[red]unknown command: {cmd}[/red]")
                 continue
 
-            await _stream_response(agent, user_input, thread_id, project_dir, gate)
+            await _stream_response(agent, user_input, thread_id, project_dir, gate, auto_approve=args.yes)
 
 
 def main() -> None:

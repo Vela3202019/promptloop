@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 from ..metrics import result_passed
+from ..paths import resolve_in_evals, validate_id
 
 
 REPORT_SYSTEM_PROMPT = (
@@ -17,8 +18,8 @@ REPORT_SYSTEM_PROMPT = (
 
 
 def make_report_tools(project_dir: Path):
-    results_dir = project_dir / ".evals" / "results"
-    prompts_dir = project_dir / ".evals" / "prompts"
+    results_dir = resolve_in_evals(project_dir, "results")
+    prompts_dir = resolve_in_evals(project_dir, "prompts")
 
     @tool(parse_docstring=True)
     async def generate_report(
@@ -40,7 +41,11 @@ def make_report_tools(project_dir: Path):
         Returns:
             The full report content (also saved to disk).
         """
-        run_dir = results_dir / prompt_id / run_id
+        try:
+            prompt_id = validate_id(prompt_id, "prompt_id")
+            run_dir = resolve_in_evals(project_dir, "results", prompt_id, validate_id(run_id, "run_id"))
+        except ValueError as e:
+            return f"Error: {e}"
         raw_file = run_dir / "raw.json"
         if not raw_file.exists():
             return f"Error: no results found for run '{run_id}'. Run run_eval first."
@@ -55,7 +60,7 @@ def make_report_tools(project_dir: Path):
         pass_rate = passed / total if total else 0
 
         prompt_content = ""
-        prompt_file = prompts_dir / prompt_id / "current.txt"
+        prompt_file = resolve_in_evals(project_dir, "prompts", prompt_id, "current.txt")
         if prompt_file.exists():
             prompt_content = prompt_file.read_text()
 
@@ -109,7 +114,16 @@ If an LLM judge gave a low score, explain what aspect of quality was lacking.
         Returns:
             The report content, or a message if no report exists yet.
         """
-        report_file = results_dir / prompt_id / run_id / "report.md"
+        try:
+            report_file = resolve_in_evals(
+                project_dir,
+                "results",
+                validate_id(prompt_id, "prompt_id"),
+                validate_id(run_id, "run_id"),
+                "report.md",
+            )
+        except ValueError as e:
+            return f"Error: {e}"
         if not report_file.exists():
             return f"No report found for run '{run_id}'. Use generate_report first."
         return report_file.read_text()
@@ -128,8 +142,15 @@ If an LLM judge gave a low score, explain what aspect of quality was lacking.
         Returns:
             A side-by-side comparison of pass rates, latency, and per-test changes.
         """
+        try:
+            prompt_id = validate_id(prompt_id, "prompt_id")
+            run_id_a = validate_id(run_id_a, "run_id")
+            run_id_b = validate_id(run_id_b, "run_id")
+        except ValueError as e:
+            return f"Error: {e}"
+
         def _load(run_id: str) -> dict[str, Any]:
-            f = results_dir / prompt_id / run_id / "raw.json"
+            f = resolve_in_evals(project_dir, "results", prompt_id, run_id, "raw.json")
             if not f.exists():
                 return {}
             return json.loads(f.read_text())

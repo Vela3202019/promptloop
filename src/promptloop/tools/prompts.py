@@ -1,13 +1,13 @@
 import difflib
 import json
-import re
 import uuid
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
 from langchain_core.tools import tool
 
-SAFE_PROMPT_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+from ..paths import resolve_in_evals, resolve_in_project, validate_id
 
 
 class ApprovalGate:
@@ -25,11 +25,11 @@ class ApprovalGate:
         self._decisions[key] = approved
 
     def consume(self, key: str) -> bool:
-        return self._decisions.pop(key, True)
+        return self._decisions.pop(key, False)
 
 
 def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
-    prompts_dir = project_dir / ".evals" / "prompts"
+    prompts_dir = resolve_in_evals(project_dir, "prompts")
 
     def _version_number(path: Path) -> Optional[int]:
         try:
@@ -76,11 +76,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
     def _prompt_dir(prompt_id: str) -> Path:
-        if not SAFE_PROMPT_ID.fullmatch(prompt_id):
-            raise ValueError(
-                "prompt_id may only contain letters, numbers, dots, underscores, and hyphens."
-            )
-        return prompts_dir / prompt_id
+        return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"))
 
     def _source_path_if_file(source: str) -> Optional[Path]:
         if "\n" in source or len(source) > 240:
@@ -91,9 +87,12 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             p = project_dir / p
 
         try:
-            return p if p.exists() and p.is_file() else None
+            exists = p.exists() and p.is_file()
         except OSError:
             return None
+        if not exists:
+            return None
+        return resolve_in_project(project_dir, p)
 
     def _diff(current: str, proposed: str, prompt_id: str) -> str:
         diff_lines = list(difflib.unified_diff(
@@ -147,10 +146,10 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if not source_path_value:
             source_note = "No source file to update for inline prompt."
         else:
-            source_path = Path(source_path_value)
-            if not source_path.is_absolute():
-                source_path = project_dir / source_path
-
+            try:
+                source_path = resolve_in_project(project_dir, Path(source_path_value))
+            except ValueError as e:
+                return f"Error: {e}; changes were not applied."
             if not source_path.exists():
                 return f"Error: source file {source_path} not found; changes were not applied."
             source_path.write_text(new_content)
@@ -182,7 +181,10 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         Returns:
             Confirmation with the registered prompt ID and a content preview.
         """
-        p = _source_path_if_file(source)
+        try:
+            p = _source_path_if_file(source)
+        except ValueError as e:
+            return f"Error: {e}"
 
         if p is not None:
             content = p.read_text()
