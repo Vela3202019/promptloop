@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from promptloop.cli import _list_thread_ids, _resolve_thread_id
 from promptloop.system_prompt import SYSTEM_PROMPT
 
@@ -26,6 +28,17 @@ def test_thread_listing_and_prefix_resolution(tmp_path):
     resolved, error = _resolve_thread_id(tmp_path, "missing")
     assert resolved is None
     assert "No saved thread found" in error
+
+
+def test_thread_listing_rejects_symlinked_chat_db(tmp_path):
+    evals = tmp_path / ".evals"
+    evals.mkdir()
+    target = tmp_path / "chat-target.db"
+    target.write_text("not a database")
+    (evals / "chat.db").symlink_to(target)
+
+    with pytest.raises(ValueError, match=r"path escapes \.evals"):
+        _list_thread_ids(tmp_path)
 
 
 def test_system_prompt_formats_without_keyerror():

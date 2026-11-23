@@ -71,9 +71,13 @@ CHAT_DB_NAME = "chat.db"
 ESCAPE_KEY = "\x1b"
 
 
+def _chat_db_path(project_dir: Path) -> Path:
+    return resolve_in_evals(project_dir, CHAT_DB_NAME)
+
+
 def _list_thread_ids(project_dir: Path) -> list[str]:
     """List thread IDs from the chat SQLite DB."""
-    db_path = project_dir / ".evals" / CHAT_DB_NAME
+    db_path = _chat_db_path(project_dir)
     if not db_path.exists():
         return []
     try:
@@ -541,6 +545,11 @@ async def amain() -> None:
         parser.error(f"--project-dir is not a directory: {project_dir}")
     _load_env(project_dir)
 
+    try:
+        db_path = _chat_db_path(project_dir)
+    except ValueError as e:
+        parser.error(str(e))
+
     if args.thread:
         resolved_thread_id, error = _resolve_thread_id(project_dir, args.thread)
         if error:
@@ -549,13 +558,8 @@ async def amain() -> None:
     else:
         thread_id = str(uuid.uuid4())
 
-    # Ensure .evals exists for chat DB, and never follow a symlink outside the project.
-    try:
-        resolve_in_evals(project_dir)
-    except ValueError as e:
-        parser.error(str(e))
-    (project_dir / ".evals").mkdir(parents=True, exist_ok=True)
-    db_path = project_dir / ".evals" / CHAT_DB_NAME
+    # Ensure .evals exists for the already-contained chat DB path.
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
         gate = ApprovalGate()
