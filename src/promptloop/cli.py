@@ -368,7 +368,10 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                 return "preview unavailable: old_string was not found"
             if count != 1 and not replace_all:
                 return f"preview unavailable: old_string matches {count} places"
-            estimated_size = len(current) + count * max(0, len(new_string) - len(old_string))
+            current_bytes = len(current.encode("utf-8"))
+            old_bytes = len(old_string.encode("utf-8"))
+            new_bytes = len(new_string.encode("utf-8"))
+            estimated_size = current_bytes + count * max(0, new_bytes - old_bytes)
             if estimated_size > MAX_FILE_PREVIEW_BYTES:
                 return "preview unavailable: edit result is too large to preview safely"
             if replace_all:
