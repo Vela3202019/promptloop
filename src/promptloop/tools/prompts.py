@@ -1,45 +1,105 @@
-import json
+import asyncio
 import difflib
-import re
-from pathlib import Path
+import json
+import uuid
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+
 from langchain_core.tools import tool
 
-SAFE_PROMPT_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+from ..paths import resolve_in_evals, resolve_in_project, validate_id
+
+
+class _ApprovalWaiter:
+    def __init__(self, future: asyncio.Future[bool]) -> None:
+        self.future = future
+        self.listener_seen = False
 
 
 class ApprovalGate:
-    """Shared approval state between the CLI and tools.
+    """Awaitable approval state shared between the CLI and tools.
 
-    The CLI sets a decision at on_tool_start (after showing the diff and
-    reading a keypress). The tool reads it synchronously when it runs,
-    which always happens after on_tool_start completes.
+    The CLI calls expect() as soon as it observes edit_prompt's on_tool_start
+    event, then resolve() after reading the keypress. The tool waits for that
+    decision because event consumption and tool execution are concurrent.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, listener_timeout: float = 1.0, decision_timeout: float = 300.0) -> None:
         self._decisions: dict[str, bool] = {}
+        self._expected: set[str] = set()
+        self._waiters: dict[str, list[_ApprovalWaiter]] = {}
+        self._listener_timeout = listener_timeout
+        self._decision_timeout = decision_timeout
+
+    def expect(self, key: str) -> None:
+        self._expected.add(key)
+        for waiter in self._waiters.get(key, []):
+            waiter.listener_seen = True
 
     def resolve(self, key: str, approved: bool) -> None:
-        self._decisions[key] = approved
+        self._expected.discard(key)
+        waiters = self._waiters.get(key)
+        if waiters:
+            waiter = waiters.pop(0)
+            if not waiters:
+                self._waiters.pop(key, None)
+            if not waiter.future.done():
+                waiter.future.set_result(approved)
+        else:
+            self._decisions[key] = approved
 
-    def consume(self, key: str) -> bool:
-        return self._decisions.pop(key, True)
+    async def consume(self, key: str) -> bool:
+        if key in self._decisions:
+            return self._decisions.pop(key)
+
+        loop = asyncio.get_running_loop()
+        waiter = _ApprovalWaiter(loop.create_future())
+        waiter.listener_seen = key in self._expected
+        self._waiters.setdefault(key, []).append(waiter)
+        try:
+            try:
+                return await asyncio.wait_for(asyncio.shield(waiter.future), timeout=self._listener_timeout)
+            except TimeoutError:
+                if not waiter.listener_seen:
+                    return False
+                try:
+                    return await asyncio.wait_for(waiter.future, timeout=self._decision_timeout)
+                except TimeoutError:
+                    return False
+        finally:
+            waiters = self._waiters.get(key)
+            if waiters is not None:
+                if waiter in waiters:
+                    waiters.remove(waiter)
+                if not waiters:
+                    self._waiters.pop(key, None)
+            if not waiter.future.done():
+                waiter.future.cancel()
 
 
 def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
-    prompts_dir = project_dir / ".evals" / "prompts"
+    prompts_dir = resolve_in_evals(project_dir, "prompts")
+
+    def _version_number(path: Path) -> int | None:
+        try:
+            return int(path.stem[1:])
+        except ValueError:
+            return None
 
     def _next_version(history_dir: Path) -> int:
-        existing = list(history_dir.glob("v*.txt"))
-        if not existing:
+        versions = []
+        for path in history_dir.glob("v*.txt"):
+            version = _version_number(path)
+            if version is not None:
+                versions.append(version)
+        if not versions:
             return 1
-        return max(int(p.stem[1:]) for p in existing) + 1
+        return max(versions) + 1
 
     def _save_prompt(
         content: str,
         prompt_id: str,
-        source_path: Optional[str],
+        source_path: str | None,
         source_type: str,
     ) -> tuple[int, Path]:
         prompt_dir = _prompt_dir(prompt_id)
@@ -62,27 +122,61 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         return version, prompt_dir
 
     def _inline_prompt_id() -> str:
-        return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        return f"inline_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
     def _prompt_dir(prompt_id: str) -> Path:
-        if not SAFE_PROMPT_ID.fullmatch(prompt_id):
-            raise ValueError(
-                "prompt_id may only contain letters, numbers, dots, underscores, and hyphens."
-            )
-        return prompts_dir / prompt_id
+        return resolve_in_evals(project_dir, "prompts", validate_id(prompt_id, "prompt_id"))
 
-    def _source_path_if_file(source: str) -> Optional[Path]:
+    def _dedupe_file_prompt_id(prompt_id: str, source_path: str) -> str:
+        candidate = prompt_id
+        suffix = 2
+        while True:
+            try:
+                prompt_dir = _prompt_dir(candidate)
+            except ValueError:
+                return candidate
+            if not prompt_dir.exists():
+                return candidate
+            meta_file = prompt_dir / "meta.json"
+            existing_source = None
+            if meta_file.exists():
+                try:
+                    existing_source = json.loads(meta_file.read_text()).get("source_path")
+                except (OSError, json.JSONDecodeError):
+                    existing_source = None
+            if existing_source == source_path:
+                return candidate
+            candidate = f"{prompt_id}_{suffix}"
+            suffix += 1
+
+    def _source_path_if_file(source: str) -> Path | None:
         if "\n" in source or len(source) > 240:
             return None
 
-        p = Path(source)
-        if not p.is_absolute():
-            p = project_dir / p
+        def _is_file(path: Path) -> bool:
+            try:
+                return path.exists() and path.is_file()
+            except OSError:
+                return False
 
-        try:
-            return p if p.exists() and p.is_file() else None
-        except OSError:
-            return None
+        raw_path = Path(source)
+        physical_path = raw_path if raw_path.is_absolute() else project_dir / raw_path
+        physical_exists = _is_file(physical_path)
+        if physical_exists:
+            try:
+                return resolve_in_project(project_dir, physical_path)
+            except ValueError:
+                if not raw_path.is_absolute():
+                    raise
+
+        if raw_path.is_absolute():
+            virtual_path = project_dir / str(raw_path).lstrip("/")
+            if _is_file(virtual_path):
+                return resolve_in_project(project_dir, virtual_path)
+
+        if physical_exists:
+            return resolve_in_project(project_dir, physical_path)
+        return None
 
     def _diff(current: str, proposed: str, prompt_id: str) -> str:
         diff_lines = list(difflib.unified_diff(
@@ -93,7 +187,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         ))
         return "".join(diff_lines)
 
-    def _build_prompt_from_edits(current: str, edits: list[dict]) -> tuple[str, Optional[str]]:
+    def _build_prompt_from_edits(current: str, edits: list[dict]) -> tuple[str, str | None]:
         if not edits:
             return current, "Error: no edits provided."
 
@@ -136,10 +230,10 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         if not source_path_value:
             source_note = "No source file to update for inline prompt."
         else:
-            source_path = Path(source_path_value)
-            if not source_path.is_absolute():
-                source_path = project_dir / source_path
-
+            try:
+                source_path = resolve_in_project(project_dir, Path(source_path_value))
+            except ValueError as e:
+                return f"Error: {e}; changes were not applied."
             if not source_path.exists():
                 return f"Error: source file {source_path} not found; changes were not applied."
             source_path.write_text(new_content)
@@ -156,7 +250,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         return f"Applied. Prompt '{prompt_id}' is now v{new_version}. {source_note}"
 
     @tool(parse_docstring=True)
-    def register_prompt(source: str, prompt_id: Optional[str] = None) -> str:
+    def register_prompt(source: str, prompt_id: str | None = None) -> str:
         """Register a prompt file or inline prompt text into the eval system.
 
         If source is an existing path, reads the file and records the path for
@@ -171,7 +265,13 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         Returns:
             Confirmation with the registered prompt ID and a content preview.
         """
-        p = _source_path_if_file(source)
+        if prompt_id is not None and not prompt_id.strip():
+            prompt_id = None
+
+        try:
+            p = _source_path_if_file(source)
+        except ValueError as e:
+            return f"Error: {e}"
 
         if p is not None:
             content = p.read_text()
@@ -187,6 +287,9 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             source_path = None
             source_type = "inline"
             source_label = "Source: inline prompt"
+
+        if source_type == "file" and source_path is not None and prompt_id is None:
+            pid = _dedupe_file_prompt_id(pid, source_path)
 
         try:
             version, _ = _save_prompt(content, pid, source_path, source_type)
@@ -239,7 +342,7 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
         return "\n".join(lines)
 
     @tool(parse_docstring=True)
-    def edit_prompt(prompt_id: str, edits: list[dict]) -> str:
+    async def edit_prompt(prompt_id: str, edits: list[dict]) -> str:
         """Edit a prompt with targeted find/replace changes.
 
         The TUI will show a diff and ask for approval before writing. If the
@@ -259,12 +362,27 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not found."
-        current = (prompt_dir / "current.txt").read_text()
+        current_file = prompt_dir / "current.txt"
+        meta_file = prompt_dir / "meta.json"
+        current = current_file.read_text()
+        base_meta = json.loads(meta_file.read_text())
+        base_version = base_meta.get("version")
         new_content, error = _build_prompt_from_edits(current, edits)
         if error:
             return error
-        if not gate.consume(prompt_id):
+        if not await gate.consume(prompt_id):
             return f"Edit to '{prompt_id}' cancelled by user."
+
+        latest_content = current_file.read_text()
+        latest_meta = json.loads(meta_file.read_text())
+        identity_fields = ("prompt_id", "source_path", "source_type", "registered_at")
+        if any(latest_meta.get(field) != base_meta.get(field) for field in identity_fields):
+            return "Error: prompt changed, re-propose the edit."
+        latest_version = latest_meta.get("version")
+        if latest_content != current or latest_version != base_version:
+            new_content, error = _build_prompt_from_edits(latest_content, edits)
+            if error:
+                return "Error: prompt changed, re-propose the edit."
         return _apply_content(prompt_id, new_content)
 
     @tool(parse_docstring=True)
@@ -286,10 +404,13 @@ def make_prompt_tools(project_dir: Path, gate: ApprovalGate):
             return f"No history found for '{prompt_id}'."
 
         meta = json.loads((prompt_dir / "meta.json").read_text())
-        versions = sorted(history_dir.glob("v*.txt"), key=lambda p: int(p.stem[1:]))
+        versioned_files = []
+        for path in history_dir.glob("v*.txt"):
+            num = _version_number(path)
+            if num is not None:
+                versioned_files.append((num, path))
         lines = [f"Version history for '{prompt_id}':"]
-        for v in versions:
-            num = int(v.stem[1:])
+        for num, v in sorted(versioned_files):
             marker = " ← current" if num == meta["version"] else ""
             lines.append(f"  v{num}: {len(v.read_text())} chars{marker}")
         return "\n".join(lines)

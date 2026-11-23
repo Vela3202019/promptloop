@@ -1,24 +1,24 @@
-import json
 import asyncio
-import uuid
-import time
+import json
 import re
-from pathlib import Path
+import time
+import uuid
+from contextlib import suppress
 from datetime import datetime
-from typing import Any, Optional
-from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage
+from pathlib import Path
+from typing import Any
+
 from langchain.chat_models import init_chat_model
-import jsonschema
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+
+from ..metrics import evaluate_sync_metric, result_passed
+from ..paths import resolve_in_evals, validate_id
 
 DEFAULT_MAX_CONCURRENCY = 4
 
 
 def make_runner_tools(project_dir: Path):
-    prompts_dir = project_dir / ".evals" / "prompts"
-    test_cases_dir = project_dir / ".evals" / "test_cases"
-    eval_configs_dir = project_dir / ".evals" / "eval_configs"
-    results_dir = project_dir / ".evals" / "results"
 
     def _get_model(model_cache: dict[str, Any], model_name: str) -> Any:
         if model_name not in model_cache:
@@ -52,7 +52,7 @@ def make_runner_tools(project_dir: Path):
         judge_prompt_template: str,
         actual_output: str,
         user_input: str,
-        expected_output: Optional[str],
+        expected_output: str | None,
         judge_model: str,
     ) -> dict:
         prompt = judge_prompt_template.format(
@@ -72,51 +72,18 @@ def make_runner_tools(project_dir: Path):
             score = raw_score if raw_score <= 1 else raw_score / 10.0
             score = min(max(score, 0.0), 1.0)
 
+        detail = (
+            "failed: could not parse a numeric score; judge response: " + raw[:500]
+            if score is None
+            else raw[:600]
+        )
+
         return {
             "type": "llm_judge",
             "passed": (score >= 0.7) if score is not None else None,
             "score": round(score, 3) if score is not None else None,
-            "detail": raw[:600],
+            "detail": detail,
         }
-
-    def _run_sync_metric(metric: dict, actual_output: str, expected_output: Optional[str]) -> dict:
-        t = metric.get("type")
-        result: dict = {"type": t, "passed": None, "score": None, "detail": ""}
-
-        if t == "latency":
-            result["detail"] = "measured separately"
-            result["passed"] = True
-
-        elif t == "json_schema":
-            try:
-                parsed = json.loads(actual_output)
-                schema = metric.get("schema")
-                if schema:
-                    jsonschema.validate(parsed, schema)
-                result["passed"] = True
-                result["detail"] = "valid JSON" + (" matching schema" if schema else "")
-            except json.JSONDecodeError as e:
-                result["passed"] = False
-                result["detail"] = f"invalid JSON: {e}"
-            except jsonschema.ValidationError as e:
-                result["passed"] = False
-                result["detail"] = f"schema mismatch: {e.message}"
-
-        elif t == "fuzzy_match":
-            if expected_output is None:
-                result["detail"] = "no expected_output provided"
-            else:
-                from difflib import SequenceMatcher
-                ratio = SequenceMatcher(None, actual_output.strip(), expected_output.strip()).ratio()
-                threshold = metric.get("threshold", 0.8)
-                result["score"] = round(ratio, 3)
-                result["passed"] = ratio >= threshold
-                result["detail"] = f"similarity {ratio:.1%} (threshold {threshold:.0%})"
-
-        elif t == "llm_judge":
-            result["detail"] = "__pending__"
-
-        return result
 
     async def _run_test_case(
         tc: dict,
@@ -161,7 +128,7 @@ def make_runner_tools(project_dir: Path):
                         metric.get("judge_model", default_judge_model),
                     ))
                 else:
-                    sync_results.append(_run_sync_metric(metric, actual_output, tc.get("expected_output")))
+                    sync_results.append(evaluate_sync_metric(metric, actual_output, tc.get("expected_output")))
 
             judge_results = await asyncio.gather(*async_tasks) if async_tasks else []
 
@@ -173,7 +140,7 @@ def make_runner_tools(project_dir: Path):
 
             result["metrics"] = sync_results + list(judge_results)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - isolate per-test model/metric failures
             result["error"] = str(e)
 
         return result
@@ -181,13 +148,13 @@ def make_runner_tools(project_dir: Path):
     @tool(parse_docstring=True)
     async def run_eval(
         prompt_id: str,
-        models: Optional[list[str]] = None,
-        test_case_ids: Optional[list[str]] = None,
+        models: list[str] | None = None,
+        test_case_ids: list[str] | None = None,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     ) -> str:
         """Run evaluation for a prompt against all (or selected) test cases.
 
-        Runs each test case × model combination with bounded concurrency.
+        Runs each test case x model combination with bounded concurrency.
         Measures latency, validates JSON schema, computes fuzzy match, and
         calls LLM-as-judge as configured per test case.
 
@@ -201,12 +168,15 @@ def make_runner_tools(project_dir: Path):
         Returns:
             Run ID and a pass/fail summary. Use generate_report() for the full analysis.
         """
-        prompt_dir = prompts_dir / prompt_id
+        try:
+            prompt_id = validate_id(prompt_id, "prompt_id")
+            prompt_dir = resolve_in_evals(project_dir, "prompts", prompt_id)
+            tc_dir = resolve_in_evals(project_dir, "test_cases", prompt_id)
+        except ValueError as e:
+            return f"Error: {e}"
         if not prompt_dir.exists():
             return f"Error: prompt '{prompt_id}' not registered."
         prompt_content = (prompt_dir / "current.txt").read_text()
-
-        tc_dir = test_cases_dir / prompt_id
         all_cases = list(tc_dir.glob("*.json")) if tc_dir.exists() else []
         if not all_cases:
             return f"Error: no test cases found for '{prompt_id}'. Add some with add_test_case."
@@ -223,7 +193,7 @@ def make_runner_tools(project_dir: Path):
         # Resolve models and default metrics.
         default_metrics = [{"type": "latency"}]
         if models is None:
-            config_file = eval_configs_dir / f"{prompt_id}.json"
+            config_file = resolve_in_evals(project_dir, "eval_configs", f"{prompt_id}.json")
             if config_file.exists():
                 config_data = json.loads(config_file.read_text())
                 resolved_models: list[str] = config_data.get("default_models", ["anthropic:claude-sonnet-4-6"])
@@ -232,7 +202,7 @@ def make_runner_tools(project_dir: Path):
                 resolved_models = ["anthropic:claude-sonnet-4-6"]
         else:
             resolved_models = models
-            config_file = eval_configs_dir / f"{prompt_id}.json"
+            config_file = resolve_in_evals(project_dir, "eval_configs", f"{prompt_id}.json")
             if config_file.exists():
                 config_data = json.loads(config_file.read_text())
                 default_metrics = config_data.get("default_metrics") or default_metrics
@@ -242,7 +212,7 @@ def make_runner_tools(project_dir: Path):
                 tc["metrics"] = default_metrics
 
         run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
-        run_dir = results_dir / prompt_id / run_id
+        run_dir = resolve_in_evals(project_dir, "results", prompt_id, validate_id(run_id, "run_id"))
         run_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_version = json.loads((prompt_dir / "meta.json").read_text()).get("version")
@@ -256,6 +226,7 @@ def make_runner_tools(project_dir: Path):
         concurrency = max(1, min(requested_concurrency, len(test_cases) * len(resolved_models)))
         semaphore = asyncio.Semaphore(concurrency)
         results: list[dict] = []
+        total_count = len(test_cases) * len(resolved_models)
 
         async def _run_limited(tc: dict, model: str) -> dict:
             async with semaphore:
@@ -267,40 +238,53 @@ def make_runner_tools(project_dir: Path):
             for model in resolved_models
         ]
 
-        for completed in asyncio.as_completed(tasks):
-            result = await completed
-            results.append(result)
-            partial_data = {
+        def _write_run_data(status: str, error: str | None = None) -> None:
+            run_data: dict[str, Any] = {
                 "run_id": run_id,
                 "prompt_id": prompt_id,
                 "models": resolved_models,
                 "prompt_version": prompt_version,
                 "started_at": started_at,
-                "status": "running",
+                "status": status,
                 "max_concurrency": concurrency,
                 "completed": len(results),
-                "total": len(tasks),
+                "total": total_count,
                 "results": results,
             }
-            (run_dir / "raw.json").write_text(json.dumps(partial_data, indent=2))
+            if error is not None:
+                run_data["error"] = error
+            (run_dir / "raw.json").write_text(json.dumps(run_data, indent=2))
 
-        run_data = {
-            "run_id": run_id,
-            "prompt_id": prompt_id,
-            "models": resolved_models,
-            "prompt_version": prompt_version,
-            "started_at": started_at,
-            "status": "complete",
-            "max_concurrency": concurrency,
-            "results": [r for r in results],
-        }
-        (run_dir / "raw.json").write_text(json.dumps(run_data, indent=2))
+        status = "running"
+        failure: str | None = None
+        try:
+            for completed in asyncio.as_completed(tasks):
+                result = await completed
+                results.append(result)
+                _write_run_data("running")
+            status = "complete"
+        except asyncio.CancelledError:
+            status = "cancelled"
+            failure = "cancelled by user"
+            raise
+        except Exception as exc:
+            status = "failed"
+            failure = str(exc)
+            raise
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if status in {"cancelled", "failed"}:
+                with suppress(Exception):
+                    _write_run_data(status, failure)
+
+        _write_run_data(status)
 
         # Summary
-        passed = sum(
-            1 for r in results
-            if not r.get("error") and all(m.get("passed") is not False for m in r.get("metrics", []))
-        )
+        passed = sum(1 for r in results if result_passed(r))
         failed = len(results) - passed
         latencies = [r["latency_ms"] for r in results if r.get("latency_ms")]
         avg_lat = sum(latencies) / len(latencies) if latencies else 0
@@ -313,7 +297,7 @@ def make_runner_tools(project_dir: Path):
             "",
         ]
         for r in results:
-            status = "✓" if not r.get("error") and all(m.get("passed") is not False for m in r.get("metrics", [])) else "✗"
+            status = "✓" if result_passed(r) else "✗"
             metric_summary = " | ".join(
                 f"{m['type']}: {m.get('detail', '') or m.get('score', '')}"
                 for m in r.get("metrics", [])
@@ -335,7 +319,10 @@ def make_runner_tools(project_dir: Path):
         Returns:
             A list of run IDs with pass/fail counts and model info.
         """
-        runs_dir = results_dir / prompt_id
+        try:
+            runs_dir = resolve_in_evals(project_dir, "results", validate_id(prompt_id, "prompt_id"))
+        except ValueError as e:
+            return f"Error: {e}"
         if not runs_dir.exists():
             return f"No eval runs found for '{prompt_id}'."
 
@@ -349,16 +336,14 @@ def make_runner_tools(project_dir: Path):
             if not raw_file.exists():
                 continue
             data = json.loads(raw_file.read_text())
-            passed = sum(
-                1 for r in data["results"]
-                if not r.get("error") and all(m.get("passed") is not False for m in r.get("metrics", []))
-            )
+            passed = sum(1 for r in data["results"] if result_passed(r))
             total = len(data["results"])
             has_report = (run_dir / "report.md").exists()
             models = ", ".join(data.get("models", []))
             v = data.get("prompt_version", "?")
+            run_status = data.get("status", "complete")
             lines.append(
-                f"  {run_dir.name}  v{v}  {passed}/{total} passed  [{models}]"
+                f"  {run_dir.name}  v{v}  {passed}/{total} passed  [{models}]  [{run_status}]"
                 + (" [report]" if has_report else "")
             )
         return "\n".join(lines)

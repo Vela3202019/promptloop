@@ -6,7 +6,31 @@ build-backend = "hatchling.build"
 name = "promptloop"
 version = "0.1.0"
 description = "Interactive agent for the full prompt eval loop: create, run, report, improve."
-requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Vela3202019" },
+]
+keywords = [
+    "llm",
+    "prompt-engineering",
+    "evaluation",
+    "langchain",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "deepagents>=0.4.11",
     "langchain>=1.2.12",
@@ -22,12 +46,38 @@ dependencies = [
     "prompt_toolkit>=3.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Vela3202019/promptloop"
+Repository = "https://github.com/Vela3202019/promptloop"
+Issues = "https://github.com/Vela3202019/promptloop/issues"
+Changelog = "https://github.com/Vela3202019/promptloop/blob/main/CHANGELOG.md"
+
 [project.scripts]
 promptloop = "promptloop.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/promptloop"]
 
+[dependency-groups]
+dev = [
+    "basedpyright>=1.36.0",
+    "pytest>=8.3.0",
+    "ruff>=0.15.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["I", "UP", "B", "F", "E", "SIM", "BLE", "PIE", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.basedpyright]
 venvPath = "."
 venv = ".venv"
+typeCheckingMode = "standard"
