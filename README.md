@@ -86,7 +86,7 @@ You'll get an interactive chat. Try things like:
 | `/thread <id>` | Switch to a thread in-session |
 | `/quit` | Exit |
 
-Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt a streaming response.
+Resume past sessions with `promptloop --thread <id>`. Press **Esc** to interrupt a streaming response. If a write approval was pending when the prior session stopped, promptloop shows that approval and streams the rest of the turn before continuing.
 
 ## Quick Demo
 

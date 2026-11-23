@@ -9,8 +9,8 @@ from promptloop.agent import create_eval_agent
 from promptloop.cli import (
     _decide_file_write_interrupt,
     _read_approval_key,
-    _reject_pending_file_writes,
     _render_file_write_action,
+    _stream_pending_file_writes,
     _stream_response,
 )
 from promptloop.tools import ApprovalGate
@@ -259,7 +259,7 @@ def test_stream_response_non_tty_denies_without_yes(tmp_path):
     asyncio.run(scenario())
 
 
-def test_pending_interrupt_rejection_clears_thread(tmp_path):
+def test_pending_interrupt_streams_resumed_turn(tmp_path, capsys):
     async def scenario():
         target = tmp_path / "out.txt"
         checkpointer = MemorySaver()
@@ -273,13 +273,16 @@ def test_pending_interrupt_rejection_clears_thread(tmp_path):
         assert len((await first_agent.aget_state(config)).interrupts) == 1
 
         restarted_agent = _make_agent(tmp_path, [AIMessage(content="done")], checkpointer)
-        rejected = await _reject_pending_file_writes(restarted_agent, "cleanup")
+        handled = await _stream_pending_file_writes(restarted_agent, "cleanup", tmp_path, ApprovalGate())
 
-        assert rejected == 1
+        assert handled is True
         assert not target.exists()
         assert not (await restarted_agent.aget_state(config)).interrupts
 
     asyncio.run(scenario())
+    output = capsys.readouterr().out
+    assert "approval required" in output
+    assert "done" in output
 
 
 def test_approval_key_non_tty_denies_and_yes_approves():

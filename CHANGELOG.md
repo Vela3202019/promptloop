@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Required registered source files to resolve inside the project after following symlinks.
 - Confined deepagents filesystem access to the project directory.
 - Made prompt-edit approval fail closed, including non-interactive use unless `--yes` is supplied.
-- Required approval before built-in `write_file`/`edit_file` filesystem mutations, with previews and clean rejection of interrupted pending writes.
+- Required approval before built-in `write_file`/`edit_file` filesystem mutations, with previews and visible resumption of interrupted pending writes.
 - Stopped loading a global `~/.env`; only project `.env` and `.env.local` are used.
 
 ### Added

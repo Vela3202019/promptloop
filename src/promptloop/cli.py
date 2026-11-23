@@ -443,51 +443,6 @@ async def _resume_file_write_interrupts(
     return Command(resume=_combine_interrupt_responses(responses))
 
 
-def _reject_interrupts_payload(interrupts: Any) -> Any:
-    responses = []
-    for item in interrupts:
-        decisions = []
-        for action in _interrupt_action_requests(item.value):
-            name = action.get("name", "file write") if isinstance(action, dict) else "file write"
-            decisions.append({
-                "type": "reject",
-                "message": f"The user declined pending approval for `{name}` while resuming the thread.",
-            })
-        responses.append((item.id, {"decisions": decisions}))
-    return _combine_interrupt_responses(responses)
-
-
-async def _reject_pending_file_writes(agent: Any, thread_id: str) -> int:
-    """Fail closed for a thread whose process exited with a pending write approval."""
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": RECURSION_LIMIT,
-    }
-    rejected = 0
-    while True:
-        state = await agent.aget_state(config)
-        if not state.interrupts:
-            return rejected
-        for item in state.interrupts:
-            rejected += len(_interrupt_action_requests(item.value))
-        await agent.ainvoke(Command(resume=_reject_interrupts_payload(state.interrupts)), config=config)
-
-
-async def _report_rejected_pending_file_writes(agent: Any, thread_id: str) -> None:
-    try:
-        rejected_pending = await _reject_pending_file_writes(agent, thread_id)
-    except Exception as exc:  # noqa: BLE001
-        detail = str(exc)[:200] or type(exc).__name__
-        console.print(f"[red]error while rejecting a pending file-write approval: {detail}[/red]")
-    else:
-        if rejected_pending:
-            console.print(
-                "[yellow]"
-                f"rejected {rejected_pending} pending file-write action(s) from the interrupted session"
-                "[/yellow]"
-            )
-
-
 async def _read_approval_key(auto_approve: bool) -> bool:
     """Read a single y/n keypress. Defaults to deny unless auto-approval is enabled."""
     if auto_approve:
@@ -512,20 +467,14 @@ async def _read_approval_key(auto_approve: bool) -> bool:
         termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
 
 
-async def _stream_response(
+async def _stream_agent_input(
     agent,
-    message: str,
-    thread_id: str,
+    stream_input: Any,
+    config: dict[str, Any],
     project_dir: Path,
     gate: ApprovalGate,
-    auto_approve: bool = False,
+    auto_approve: bool,
 ) -> None:
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": RECURSION_LIMIT,
-    }
-    stream_input: Any = {"messages": [HumanMessage(content=message)]}
-
     while True:
         status = await _stream_single_input(agent, stream_input, config, project_dir, gate, auto_approve)
         if status != "completed":
@@ -547,6 +496,49 @@ async def _stream_response(
             console.print(f"\n[red]error processing write approval: {detail}[/red]", end="")
             break
     console.print()
+
+
+async def _stream_pending_file_writes(
+    agent,
+    thread_id: str,
+    project_dir: Path,
+    gate: ApprovalGate,
+    auto_approve: bool = False,
+) -> bool:
+    """Resume a thread's pending write approvals through the visible streaming path."""
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": RECURSION_LIMIT,
+    }
+    try:
+        state = await agent.aget_state(config)
+        if not state.interrupts:
+            return False
+        console.print("[yellow]pending file-write approval from the interrupted session[/yellow]")
+        stream_input = await _resume_file_write_interrupts(project_dir, state.interrupts, auto_approve)
+    except Exception as exc:  # noqa: BLE001
+        detail = str(exc)[:200] or type(exc).__name__
+        console.print(f"[red]error processing pending write approval: {detail}[/red]")
+        return True
+
+    await _stream_agent_input(agent, stream_input, config, project_dir, gate, auto_approve)
+    return True
+
+
+async def _stream_response(
+    agent,
+    message: str,
+    thread_id: str,
+    project_dir: Path,
+    gate: ApprovalGate,
+    auto_approve: bool = False,
+) -> None:
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": RECURSION_LIMIT,
+    }
+    stream_input: Any = {"messages": [HumanMessage(content=message)]}
+    await _stream_agent_input(agent, stream_input, config, project_dir, gate, auto_approve)
 
 
 async def _stream_single_input(
@@ -869,7 +861,7 @@ async def amain() -> None:
         console.print(f"[dim]project: {project_dir}[/dim]")
         if args.thread:
             console.print(f"[dim]thread: {thread_id}[/dim] (resuming)")
-            await _report_rejected_pending_file_writes(agent, thread_id)
+            await _stream_pending_file_writes(agent, thread_id, project_dir, gate, auto_approve=args.yes)
         console.print()
 
         session = _create_prompt_session()
@@ -924,7 +916,7 @@ async def amain() -> None:
                     else:
                         thread_id = resolved_thread_id or arg
                         console.print(f"[dim]switched to thread {thread_id}[/dim]")
-                        await _report_rejected_pending_file_writes(agent, thread_id)
+                        await _stream_pending_file_writes(agent, thread_id, project_dir, gate, auto_approve=args.yes)
                 elif cmd == "/thread":
                     console.print("[red]Usage: /thread <thread_id>[/red]")
                 else:
