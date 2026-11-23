@@ -324,7 +324,7 @@ def _render_file_write_action(project_dir: Path, name: str, args: dict[str, Any]
                 preview = "\n".join(lines[:30])[:1200]
                 sys.stdout.write("  proposed content:\n")
                 if preview:
-                    preview_lines = "\n".join(f"    {_terminal_safe(line)}" for line in preview.splitlines())
+                    preview_lines = "\n".join(f"    {_terminal_safe(line)}" for line in preview.split("\n"))
                     sys.stdout.write(preview_lines + "\n")
                 if truncated:
                     sys.stdout.write("    …\n    [truncated preview]\n")
